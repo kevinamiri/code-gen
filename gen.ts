@@ -25,7 +25,7 @@ interface TableSchema {
 
 interface Schema {
   tables: Record<string, TableSchema>
-  config?: { output_dir?: string; embed_model?: string; embed_dim?: number }
+  config?: { output_dir?: string; embed_model?: string; embed_dim?: number; db_schema?: string }
 }
 
 interface ColumnReference {
@@ -107,6 +107,14 @@ const toSqlType = (pgType: string): string => {
 const toSqlOps = (ops?: string): string | undefined => {
   if (!ops) return ops
   return ops.replace(/\bvector_cosine_ops\b/g, VECTOR_COSINE_OPS_FQN)
+}
+
+const normalizeDbSchema = (schema?: string): string => {
+  const value = (schema ?? 'public').trim()
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) {
+    throw new Error(`Invalid db schema "${schema}"`)
+  }
+  return value
 }
 
 // ────────────────────────── Pattern Resolution ──────────────────────────
@@ -254,7 +262,7 @@ function resolveColumnReference(col: SchemaColumn, knownTables: string[]): Colum
   }
 }
 
-function sqlColumnDef(col: SchemaColumn, knownTables: string[]): string {
+function sqlColumnDef(col: SchemaColumn, knownTables: string[], dbSchema: string): string {
   const defaultExpr = sqlDefaultExpr(col)
   const ref = resolveColumnReference(col, knownTables)
   let def = `  ${col.name} ${toSqlType(col.type)}`
@@ -263,7 +271,7 @@ function sqlColumnDef(col: SchemaColumn, knownTables: string[]): string {
   if (col.nullable === false && !col.primary) def += ' NOT NULL'
   if (defaultExpr) def += ` DEFAULT ${defaultExpr}`
   if (ref) {
-    def += ` REFERENCES ${(ref.schema ?? 'public')}.${ref.table}(${ref.column ?? 'id'})`
+    def += ` REFERENCES ${(ref.schema ?? dbSchema)}.${ref.table}(${ref.column ?? 'id'})`
     if (ref.on_delete) def += ` ON DELETE ${ref.on_delete}`
     if (ref.on_update) def += ` ON UPDATE ${ref.on_update}`
   }
@@ -283,9 +291,9 @@ function sqlDefaultExpr(col: SchemaColumn): string | null {
   return raw
 }
 
-function genTableDDL(name: string, table: TableSchema, knownTables: string[]): string {
-  const defs = table.columns.map(c => sqlColumnDef(c, knownTables)).join(',\n')
-  return `CREATE TABLE IF NOT EXISTS public.${name} (\n${defs}\n);`
+function genTableDDL(name: string, table: TableSchema, knownTables: string[], dbSchema: string): string {
+  const defs = table.columns.map(c => sqlColumnDef(c, knownTables, dbSchema)).join(',\n')
+  return `CREATE TABLE IF NOT EXISTS ${dbSchema}.${name} (\n${defs}\n);`
 }
 
 function tableUsesDefaultFn(table: TableSchema, fnName: string): boolean {
@@ -293,7 +301,7 @@ function tableUsesDefaultFn(table: TableSchema, fnName: string): boolean {
   return table.columns.some(col => typeof col.default === 'string' && pattern.test(col.default))
 }
 
-function genIndexes(name: string, table: TableSchema, a: TableAnalysis): string {
+function genIndexes(name: string, table: TableSchema, a: TableAnalysis, dbSchema: string): string {
   const lines: string[] = []
   const declared = new Set((table.indexes ?? []).flatMap(i => i.columns))
 
@@ -301,26 +309,26 @@ function genIndexes(name: string, table: TableSchema, a: TableAnalysis): string 
   for (const idx of table.indexes ?? []) {
     const cols = idx.columns.join(', ')
     const ops = idx.ops ? ` ${toSqlOps(idx.ops)}` : ''
-    lines.push(`-- Why: speed up queries filtering/sorting by [${cols}] on ${name}.\nCREATE INDEX IF NOT EXISTS ${name}_${idx.columns.join('_')}_idx\n  ON public.${name} USING ${idx.type} (${cols}${ops});`)
+    lines.push(`-- Why: speed up queries filtering/sorting by [${cols}] on ${name}.\nCREATE INDEX IF NOT EXISTS ${name}_${idx.columns.join('_')}_idx\n  ON ${dbSchema}.${name} USING ${idx.type} (${cols}${ops});`)
   }
 
   // Auto-indexes for vector columns
   for (const vc of a.vectorCols) {
     if (declared.has(vc.name)) continue
     const method = vc.index ?? 'hnsw'
-    lines.push(`-- Why: accelerate nearest-neighbor/vector similarity search on ${name}.${vc.name}.\nCREATE INDEX IF NOT EXISTS ${name}_${vc.name}_idx\n  ON public.${name} USING ${method} (${vc.name} ${VECTOR_COSINE_OPS_FQN});`)
+    lines.push(`-- Why: accelerate nearest-neighbor/vector similarity search on ${name}.${vc.name}.\nCREATE INDEX IF NOT EXISTS ${name}_${vc.name}_idx\n  ON ${dbSchema}.${name} USING ${method} (${vc.name} ${VECTOR_COSINE_OPS_FQN});`)
   }
 
   // Auto-indexes for jsonb columns
   for (const jc of a.jsonbCols) {
     if (declared.has(jc.name)) continue
-    lines.push(`-- Why: speed up JSONB containment/path lookups on ${name}.${jc.name}.\nCREATE INDEX IF NOT EXISTS ${name}_${jc.name}_idx\n  ON public.${name} USING gin (${jc.name});`)
+    lines.push(`-- Why: speed up JSONB containment/path lookups on ${name}.${jc.name}.\nCREATE INDEX IF NOT EXISTS ${name}_${jc.name}_idx\n  ON ${dbSchema}.${name} USING gin (${jc.name});`)
   }
 
   // Auto-indexes for array columns
   for (const ac of a.arrayCols) {
     if (declared.has(ac.name)) continue
-    lines.push(`-- Why: speed up array overlap/contains queries on ${name}.${ac.name}.\nCREATE INDEX IF NOT EXISTS ${name}_${ac.name}_idx\n  ON public.${name} USING gin (${ac.name});`)
+    lines.push(`-- Why: speed up array overlap/contains queries on ${name}.${ac.name}.\nCREATE INDEX IF NOT EXISTS ${name}_${ac.name}_idx\n  ON ${dbSchema}.${name} USING gin (${ac.name});`)
   }
 
   return lines.join('\n\n')
@@ -328,7 +336,7 @@ function genIndexes(name: string, table: TableSchema, a: TableAnalysis): string 
 
 // ── Vector search RPC ──
 
-function genSearchRpc(name: string, a: TableAnalysis): string {
+function genSearchRpc(name: string, a: TableAnalysis, dbSchema: string): string {
   if (!a.searchVectorCol) return ''
   const vc = a.searchVectorCol
   const dim = vc.type.match(/\d+/)?.[0] ?? '1536'
@@ -342,7 +350,7 @@ function genSearchRpc(name: string, a: TableAnalysis): string {
 
   return `
 -- Why: expose one RPC for semantic similarity search plus dynamic metadata filters.
-CREATE OR REPLACE FUNCTION public.search_${name}(
+CREATE OR REPLACE FUNCTION ${dbSchema}.search_${name}(
   query_embedding ${VECTOR_TYPE_FQN}(${dim}) DEFAULT NULL,
   match_threshold float DEFAULT 0.0,
   match_count int DEFAULT 10,
@@ -370,7 +378,7 @@ BEGIN
     sql_q := sql_q || ', 1.0::float AS similarity';
   END IF;
 
-  sql_q := sql_q || ' FROM public.${name} t';
+  sql_q := sql_q || ' FROM ${dbSchema}.${name} t';
 
   -- Apply dynamic conditions
   FOR i IN 0 .. COALESCE(jsonb_array_length(conditions), 0) - 1 LOOP
@@ -414,13 +422,13 @@ $$;`
 
 // ── JSONB merge RPC ──
 
-function genMergeRpc(name: string, col: ResolvedColumn, a: TableAnalysis): string {
+function genMergeRpc(name: string, col: ResolvedColumn, a: TableAnalysis, dbSchema: string): string {
   const hasUpdatedAt = a.columns.some(c => c.name === 'updated_at')
   const setUpdated = hasUpdatedAt ? ', updated_at = now()' : ''
 
   return `
 -- Why: allow partial JSONB updates without replacing the whole ${col.name} document.
-CREATE OR REPLACE FUNCTION public.update_${name}_${col.name}(
+CREATE OR REPLACE FUNCTION ${dbSchema}.update_${name}_${col.name}(
   p_id ${a.primary.type},
   p_data jsonb
 )
@@ -430,11 +438,11 @@ DECLARE
   merged jsonb;
 BEGIN
   SELECT ${col.name} INTO current_val
-    FROM public.${name} WHERE ${a.primary.name} = p_id;
+    FROM ${dbSchema}.${name} WHERE ${a.primary.name} = p_id;
 
   merged := COALESCE(current_val, '{}'::jsonb) || p_data;
 
-  UPDATE public.${name}
+  UPDATE ${dbSchema}.${name}
     SET ${col.name} = merged${setUpdated}
     WHERE ${a.primary.name} = p_id;
 
@@ -445,19 +453,19 @@ $$;`
 
 // ── JSONB append RPC ──
 
-function genAppendRpc(name: string, col: ResolvedColumn, a: TableAnalysis): string {
+function genAppendRpc(name: string, col: ResolvedColumn, a: TableAnalysis, dbSchema: string): string {
   const hasUpdatedAt = a.columns.some(c => c.name === 'updated_at')
   const setUpdated = hasUpdatedAt ? ',\n      updated_at = now()' : ''
 
   return `
 -- Why: append one JSONB entry to ${col.name} while preserving existing array items.
-CREATE OR REPLACE FUNCTION public.append_${name}_${col.name}(
+CREATE OR REPLACE FUNCTION ${dbSchema}.append_${name}_${col.name}(
   p_id ${a.primary.type},
   p_entry jsonb
 )
 RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
-  UPDATE public.${name}
+  UPDATE ${dbSchema}.${name}
     SET ${col.name} = COALESCE(${col.name}, '[]'::jsonb) || jsonb_build_array(p_entry)${setUpdated}
     WHERE ${a.primary.name} = p_id;
 END;
@@ -466,10 +474,10 @@ $$;`
 
 // ── Stats aggregation RPC ──
 
-function genStatsRpc(name: string, col: ResolvedColumn, a: TableAnalysis): string {
+function genStatsRpc(name: string, col: ResolvedColumn, a: TableAnalysis, dbSchema: string): string {
   return `
 -- Why: compute aggregate statistics for numeric metrics stored inside ${col.name}.
-CREATE OR REPLACE FUNCTION public.get_${name}_${col.name}_stats(
+CREATE OR REPLACE FUNCTION ${dbSchema}.get_${name}_${col.name}_stats(
   p_metric_key text,
   p_filter jsonb DEFAULT '{}'::jsonb
 )
@@ -484,7 +492,7 @@ DECLARE
 BEGIN
   sql_q := format(
     'SELECT %L::text, count(*)::bigint, avg(val)::float, min(val)::float, max(val)::float, stddev(val)::float '
-    'FROM (SELECT (${col.name}->>%L)::float AS val FROM public.${name} WHERE ${col.name} ? %L',
+    'FROM (SELECT (${col.name}->>%L)::float AS val FROM ${dbSchema}.${name} WHERE ${col.name} ? %L',
     p_metric_key, p_metric_key, p_metric_key
   );
 
@@ -501,13 +509,15 @@ $$;`
 
 // ── Queue infrastructure (shared, generated once) ──
 
-function genQueueInfra(): string {
+function genQueueInfra(dbSchema: string): string {
+  const createSchema = dbSchema === 'public' ? '' : `CREATE SCHEMA IF NOT EXISTS ${dbSchema};\n\n`
   return `-- ═══════════════════════════════════════════════════════════════
 -- Shared Queue Infrastructure
 -- Generated by code-gen v2
 -- ═══════════════════════════════════════════════════════════════
 
-CREATE TABLE IF NOT EXISTS public.queue_messages (
+${createSchema}
+CREATE TABLE IF NOT EXISTS ${dbSchema}.queue_messages (
   id bigserial PRIMARY KEY,
   topic text NOT NULL,
   payload jsonb NOT NULL,
@@ -525,31 +535,31 @@ CREATE TABLE IF NOT EXISTS public.queue_messages (
 
 -- Why: make ready-job polling efficient for workers by topic and availability time.
 CREATE INDEX IF NOT EXISTS queue_messages_ready_idx
-  ON public.queue_messages (topic, available_at, id)
+  ON ${dbSchema}.queue_messages (topic, available_at, id)
   WHERE status = 'ready';
 
 -- Why: centralize insertion of queue jobs and return the created job id.
-CREATE OR REPLACE FUNCTION public.enqueue_message(
+CREATE OR REPLACE FUNCTION ${dbSchema}.enqueue_message(
   p_topic text, p_payload jsonb, p_available_at timestamptz DEFAULT now()
 )
 RETURNS bigint LANGUAGE sql AS $$
-  INSERT INTO public.queue_messages (topic, payload, available_at)
+  INSERT INTO ${dbSchema}.queue_messages (topic, payload, available_at)
   VALUES (p_topic, p_payload, p_available_at) RETURNING id;
 $$;
 
 -- Why: atomically lease one ready job for a worker with a visibility timeout.
-CREATE OR REPLACE FUNCTION public.dequeue_message(
+CREATE OR REPLACE FUNCTION ${dbSchema}.dequeue_message(
   p_topic text, p_worker_id text, visibility_timeout_seconds int DEFAULT 120
 )
-RETURNS SETOF public.queue_messages LANGUAGE plpgsql AS $$
-DECLARE v_row public.queue_messages;
+RETURNS SETOF ${dbSchema}.queue_messages LANGUAGE plpgsql AS $$
+DECLARE v_row ${dbSchema}.queue_messages;
 BEGIN
   WITH next_job AS (
-    SELECT id FROM public.queue_messages
+    SELECT id FROM ${dbSchema}.queue_messages
     WHERE topic = p_topic AND status = 'ready' AND available_at <= now()
     ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
   )
-  UPDATE public.queue_messages q SET
+  UPDATE ${dbSchema}.queue_messages q SET
     status = CASE WHEN q.attempts + 1 >= q.max_attempts THEN 'failed' ELSE 'processing' END,
     locked_at = now(), locked_by = p_worker_id,
     attempts = q.attempts + 1,
@@ -563,20 +573,20 @@ END;
 $$;
 
 -- Why: mark a leased job as done only for the worker that owns the lock.
-CREATE OR REPLACE FUNCTION public.ack_message(p_id bigint, p_worker_id text)
+CREATE OR REPLACE FUNCTION ${dbSchema}.ack_message(p_id bigint, p_worker_id text)
 RETURNS void LANGUAGE sql AS $$
-  UPDATE public.queue_messages
+  UPDATE ${dbSchema}.queue_messages
   SET status = 'done', locked_at = null, locked_by = null
   WHERE id = p_id AND locked_by = p_worker_id;
 $$;
 
 -- Why: release a failed job back to the queue with retry backoff and error context.
-CREATE OR REPLACE FUNCTION public.nack_message(
+CREATE OR REPLACE FUNCTION ${dbSchema}.nack_message(
   p_id bigint, p_worker_id text,
   backoff_seconds int DEFAULT 30, p_error text DEFAULT null
 )
 RETURNS void LANGUAGE sql AS $$
-  UPDATE public.queue_messages SET
+  UPDATE ${dbSchema}.queue_messages SET
     status = 'ready', locked_at = null, locked_by = null,
     available_at = now() + make_interval(secs => backoff_seconds),
     last_error = p_error
@@ -587,7 +597,7 @@ $$;
 
 // ── Queue trigger (per table) ──
 
-function genQueueTrigger(name: string, a: TableAnalysis): string {
+function genQueueTrigger(name: string, a: TableAnalysis, dbSchema: string): string {
   if (!a.hasQueueTrigger) return ''
 
   const contentChecks = a.contentCols.length
@@ -597,11 +607,11 @@ function genQueueTrigger(name: string, a: TableAnalysis): string {
   return `
 -- Auto-enqueue trigger for ${name}
 -- Why: enqueue background work automatically after inserts/meaningful content updates.
-CREATE OR REPLACE FUNCTION public.enqueue_${name}_job()
+CREATE OR REPLACE FUNCTION ${dbSchema}.enqueue_${name}_job()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    PERFORM public.enqueue_message(
+    PERFORM ${dbSchema}.enqueue_message(
       '${name}',
       jsonb_build_object('${a.primary.name}', NEW.${a.primary.name})
     );
@@ -610,7 +620,7 @@ BEGIN
 
   IF TG_OP = 'UPDATE' THEN
     IF ${contentChecks} THEN
-      PERFORM public.enqueue_message(
+      PERFORM ${dbSchema}.enqueue_message(
         '${name}',
         jsonb_build_object('${a.primary.name}', NEW.${a.primary.name})
       );
@@ -622,15 +632,15 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS ${name}_enqueue_job ON public.${name};
+DROP TRIGGER IF EXISTS ${name}_enqueue_job ON ${dbSchema}.${name};
 CREATE TRIGGER ${name}_enqueue_job
-  AFTER INSERT OR UPDATE ON public.${name}
-  FOR EACH ROW EXECUTE FUNCTION public.enqueue_${name}_job();`
+  AFTER INSERT OR UPDATE ON ${dbSchema}.${name}
+  FOR EACH ROW EXECUTE FUNCTION ${dbSchema}.enqueue_${name}_job();`
 }
 
 // ── Drop statements (clean re-runs) ──
 
-function genDrops(name: string, table: TableSchema, a: TableAnalysis): string {
+function genDrops(name: string, table: TableSchema, a: TableAnalysis, dbSchema: string): string {
   const drops: string[] = []
   const declared = new Set((table.indexes ?? []).flatMap(i => i.columns))
   const indexNames = new Set<string>()
@@ -649,24 +659,24 @@ function genDrops(name: string, table: TableSchema, a: TableAnalysis): string {
   }
 
   if (a.hasQueueTrigger) {
-    drops.push(`DROP TRIGGER IF EXISTS ${name}_enqueue_job ON public.${name} CASCADE;`)
-    drops.push(`DROP FUNCTION IF EXISTS public.enqueue_${name}_job CASCADE;`)
+    drops.push(`DROP TRIGGER IF EXISTS ${name}_enqueue_job ON ${dbSchema}.${name} CASCADE;`)
+    drops.push(`DROP FUNCTION IF EXISTS ${dbSchema}.enqueue_${name}_job CASCADE;`)
   }
-  if (a.hasSearch) drops.push(`DROP FUNCTION IF EXISTS public.search_${name} CASCADE;`)
+  if (a.hasSearch) drops.push(`DROP FUNCTION IF EXISTS ${dbSchema}.search_${name} CASCADE;`)
   for (const c of a.jsonbCols) {
-    drops.push(`DROP FUNCTION IF EXISTS public.update_${name}_${c.name} CASCADE;`)
-    drops.push(`DROP FUNCTION IF EXISTS public.append_${name}_${c.name} CASCADE;`)
-    drops.push(`DROP FUNCTION IF EXISTS public.get_${name}_${c.name}_stats CASCADE;`)
+    drops.push(`DROP FUNCTION IF EXISTS ${dbSchema}.update_${name}_${c.name} CASCADE;`)
+    drops.push(`DROP FUNCTION IF EXISTS ${dbSchema}.append_${name}_${c.name} CASCADE;`)
+    drops.push(`DROP FUNCTION IF EXISTS ${dbSchema}.get_${name}_${c.name}_stats CASCADE;`)
   }
-  for (const idx of indexNames) drops.push(`DROP INDEX IF EXISTS public.${idx} CASCADE;`)
-  drops.push(`DROP TABLE IF EXISTS public.${name} CASCADE;`)
+  for (const idx of indexNames) drops.push(`DROP INDEX IF EXISTS ${dbSchema}.${idx} CASCADE;`)
+  drops.push(`DROP TABLE IF EXISTS ${dbSchema}.${name} CASCADE;`)
 
   return drops.join('\n')
 }
 
 // ── Full SQL composer ──
 
-function generateSQL(name: string, table: TableSchema, a: TableAnalysis, knownTables: string[] = []): string {
+function generateSQL(name: string, table: TableSchema, a: TableAnalysis, knownTables: string[] = [], dbSchema = 'public'): string {
   const sections: string[] = []
 
   sections.push(
@@ -676,8 +686,11 @@ function generateSQL(name: string, table: TableSchema, a: TableAnalysis, knownTa
     `-- ═══════════════════════════════════════════════════════════════`
   )
 
-  const drops = genDrops(name, table, a)
+  const drops = genDrops(name, table, a, dbSchema)
   if (drops) sections.push(drops)
+  if (dbSchema !== 'public') {
+    sections.push(`CREATE SCHEMA IF NOT EXISTS ${dbSchema};`)
+  }
 
   if (a.hasEmbedder) {
     sections.push(`CREATE SCHEMA IF NOT EXISTS extensions;`)
@@ -690,16 +703,16 @@ function generateSQL(name: string, table: TableSchema, a: TableAnalysis, knownTa
     sections.push(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`)
   }
 
-  sections.push(genTableDDL(name, table, knownTables))
+  sections.push(genTableDDL(name, table, knownTables, dbSchema))
 
-  const indexes = genIndexes(name, table, a)
+  const indexes = genIndexes(name, table, a, dbSchema)
   if (indexes) sections.push(indexes)
 
-  if (a.hasSearch) sections.push(genSearchRpc(name, a))
-  for (const c of a.mergeCols) sections.push(genMergeRpc(name, c, a))
-  for (const c of a.appendCols) sections.push(genAppendRpc(name, c, a))
-  for (const c of a.statsCols) sections.push(genStatsRpc(name, c, a))
-  if (a.hasQueueTrigger) sections.push(genQueueTrigger(name, a))
+  if (a.hasSearch) sections.push(genSearchRpc(name, a, dbSchema))
+  for (const c of a.mergeCols) sections.push(genMergeRpc(name, c, a, dbSchema))
+  for (const c of a.appendCols) sections.push(genAppendRpc(name, c, a, dbSchema))
+  for (const c of a.statsCols) sections.push(genStatsRpc(name, c, a, dbSchema))
+  if (a.hasQueueTrigger) sections.push(genQueueTrigger(name, a, dbSchema))
 
   return sections.join('\n\n')
 }
@@ -730,7 +743,7 @@ function generateTypes(name: string, _table: TableSchema, a: TableAnalysis): str
   lines.push('')
 
   // Options interface
-  lines.push(`export interface ${P}Options { url: string; key: string; graphqlUrl?: string;${a.hasEmbedder ? ' embedder: Embedder;' : ''} }\n`)
+  lines.push(`export interface ${P}Options { url: string; key: string; schema?: string; graphqlUrl?: string;${a.hasEmbedder ? ' embedder: Embedder;' : ''} }\n`)
 
   // Insert interface — excludes auto-generated columns
   lines.push(`export interface ${P}Insert {`)
@@ -776,7 +789,7 @@ function generateTypes(name: string, _table: TableSchema, a: TableAnalysis): str
 // 🔧 SDK GENERATION
 // ═══════════════════════════════════════════════════════════════
 
-function generateSDK(name: string, _table: TableSchema, a: TableAnalysis): string {
+function generateSDK(name: string, _table: TableSchema, a: TableAnalysis, defaultDbSchema = 'public'): string {
   const P = a.pascal
   const idTs = mapIdType(a.primary.type)
   const L: string[] = [] // lines accumulator
@@ -805,7 +818,7 @@ function generateSDK(name: string, _table: TableSchema, a: TableAnalysis): strin
 
   // ── Constructor ──
   L.push(`  constructor(opts: ${P}Options) {`)
-  L.push(`    this.supabase = createClient(opts.url, opts.key, { auth: { persistSession: false, autoRefreshToken: false } });`)
+  L.push(`    this.supabase = createClient(opts.url, opts.key, { auth: { persistSession: false, autoRefreshToken: false }, db: { schema: opts.schema ?? "${defaultDbSchema}" } });`)
   L.push(`    this.apiKey = opts.key;`)
   L.push(`    this.graphqlUrl = opts.graphqlUrl ?? \`\${opts.url.replace(/\\/+$/, "")}/graphql/v1\`;`)
   if (a.hasEmbedder) L.push(`    this.embedder = opts.embedder;`)
@@ -1053,7 +1066,7 @@ function sampleValueForTsType(tsType: string, pgType?: string): string {
   return `null`
 }
 
-function generateExampleFile(schema: Schema, tables: Array<{ name: string; analysis: TableAnalysis }>): string {
+function generateExampleFile(schema: Schema, tables: Array<{ name: string; analysis: TableAnalysis }>, defaultDbSchema = 'public'): string {
   const lines: string[] = []
   const hasEmbedder = tables.some(t => t.analysis.hasEmbedder)
   const embedDim = schema.config?.embed_dim ?? 1536
@@ -1066,6 +1079,7 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
   lines.push(`/** ---------------- Config ---------------- */`)
   lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
   lines.push(`const SUPABASE_KEY = process.env.SUPABASE_KEY ?? "";`)
+  lines.push(`const SUPABASE_DB_SCHEMA = process.env.SUPABASE_DB_SCHEMA ?? "${defaultDbSchema}";`)
 
   if (hasEmbedder) {
     lines.push(`const EMBEDDING_DIMENSIONS = ${embedDim};`)
@@ -1125,9 +1139,9 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
     lines.push(`/** ---------------- Examples ---------------- */`)
     lines.push(`async function ${fnName}(): Promise<void> {`)
     if (a.hasEmbedder) {
-      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_KEY, embedder });`)
+      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_KEY, schema: SUPABASE_DB_SCHEMA, embedder });`)
     } else {
-      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_KEY });`)
+      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_KEY, schema: SUPABASE_DB_SCHEMA });`)
     }
     lines.push('')
     lines.push(`  /** Insert a new row and log its id */`)
@@ -1252,6 +1266,7 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
   const raw = fs.readFileSync(schemaPath, 'utf8')
   const schema: Schema = yaml.parse(raw)
   const dir = schema.config?.output_dir ?? outputDir
+  const dbSchema = normalizeDbSchema(schema.config?.db_schema)
   const tableNames = Object.keys(schema.tables)
 
 
@@ -1273,7 +1288,7 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
     if (analysis.hasQueueTrigger) needsQueue = true
 
     // SQL migration
-    const sql = generateSQL(name, table, analysis, tableNames)
+    const sql = generateSQL(name, table, analysis, tableNames, dbSchema)
     await writeFile(path.join(dir, `sql/${name}.sql`), sql)
     console.log(`  ✓ ${name}.sql`)
 
@@ -1283,18 +1298,18 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
     console.log(`  ✓ ${name}-types.ts`)
 
     // TypeScript SDK
-    const sdk = generateSDK(name, table, analysis)
+    const sdk = generateSDK(name, table, analysis, dbSchema)
     await writeFile(path.join(dir, `sdk/${name}-sdk.ts`), sdk)
     console.log(`  ✓ ${name}-sdk.ts`)
   }
 
-  const example = generateExampleFile(schema, analyzedTables)
+  const example = generateExampleFile(schema, analyzedTables, dbSchema)
   await writeFile(path.join(dir, 'example.ts'), example)
   console.log(`  ✓ example.ts`)
 
   // Shared queue infrastructure (generated once if any table needs it)
   if (needsQueue) {
-    await writeFile(path.join(dir, 'queue.sql'), genQueueInfra())
+    await writeFile(path.join(dir, 'queue.sql'), genQueueInfra(dbSchema))
     console.log(`  ✓ queue.sql (shared queue infrastructure)`)
   }
 

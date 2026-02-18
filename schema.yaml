@@ -72,3 +72,4 @@ tables:
 config:
   output_dir: ./generated
   embed_dim: 1536
+  db_schema: app
