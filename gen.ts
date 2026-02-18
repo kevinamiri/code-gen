@@ -20,7 +20,7 @@ interface SchemaColumn {
 
 interface TableSchema {
   description?: string; columns: SchemaColumn[];
-  access?: 'anon' | 'authenticated' | Array<'anon' | 'authenticated'>;
+  access?: 'anon' | 'authenticated' | 'service_role' | Array<'anon' | 'authenticated' | 'service_role'>;
   features?: string[]; indexes?: { columns: string[]; type: string; ops?: string }[];
 }
 
@@ -52,7 +52,7 @@ interface TableAnalysis {
   searchVectorCol: ResolvedColumn | null;
   mergeCols: ResolvedColumn[]; appendCols: ResolvedColumn[]; statsCols: ResolvedColumn[];
   contentCols: ResolvedColumn[];       // trigger re-enqueue on change
-  accessRoles: Array<'anon' | 'authenticated'>;
+  accessRoles: Array<'anon' | 'authenticated' | 'service_role'>;
   hasEmbedder: boolean; hasQueueTrigger: boolean; hasSearch: boolean;
 }
 
@@ -141,15 +141,15 @@ function resolvePatterns(col: SchemaColumn): string[] {
   return []
 }
 
-function normalizeAccessRoles(input: TableSchema['access']): Array<'anon' | 'authenticated'> {
+function normalizeAccessRoles(input: TableSchema['access']): Array<'anon' | 'authenticated' | 'service_role'> {
   if (!input) return []
   const raw = Array.isArray(input) ? input : [input]
   const unique = Array.from(new Set(raw))
-  const invalid = unique.filter(r => r !== 'anon' && r !== 'authenticated')
+  const invalid = unique.filter(r => r !== 'anon' && r !== 'authenticated' && r !== 'service_role')
   if (invalid.length) {
-    throw new Error(`Invalid access role(s): ${invalid.join(', ')}. Allowed values: anon, authenticated`)
+    throw new Error(`Invalid access role(s): ${invalid.join(', ')}. Allowed values: anon, authenticated, service_role`)
   }
-  return unique as Array<'anon' | 'authenticated'>
+  return unique as Array<'anon' | 'authenticated' | 'service_role'>
 }
 
 // ────────────────────────── Table Analysis ──────────────────────────
@@ -736,7 +736,88 @@ function generatePoliciesSQL(name: string, a: TableAnalysis, dbSchema: string): 
   if (!a.accessRoles.length) return ''
 
   const roles = a.accessRoles.join(', ')
-  const policyName = `${name}_client_access`
+  const hasUserId = a.columns.some(c => c.name === 'user_id')
+  const isPublicAnon = a.accessRoles.includes('anon')
+  const ownerPredicate = '(select auth.uid()) = user_id'
+  const ownerRoles = hasUserId && !isPublicAnon && a.accessRoles.includes('authenticated') ? ['authenticated'] : []
+  const openRoles = a.accessRoles.filter(r => !ownerRoles.includes(r))
+  const policyLines: string[] = []
+
+  if (openRoles.length) {
+    const openTo = openRoles.join(', ')
+    const base = `${name}_open_access`
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_select ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_select`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR SELECT`)
+    policyLines.push(`  TO ${openTo}`)
+    policyLines.push(`  USING (true);`)
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_insert ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_insert`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR INSERT`)
+    policyLines.push(`  TO ${openTo}`)
+    policyLines.push(`  WITH CHECK (true);`)
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_update ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_update`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR UPDATE`)
+    policyLines.push(`  TO ${openTo}`)
+    policyLines.push(`  USING (true)`)
+    policyLines.push(`  WITH CHECK (true);`)
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_delete ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_delete`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR DELETE`)
+    policyLines.push(`  TO ${openTo}`)
+    policyLines.push(`  USING (true);`)
+  }
+
+  if (ownerRoles.length) {
+    const ownerTo = ownerRoles.join(', ')
+    const base = `${name}_owner_access`
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_select ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_select`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR SELECT`)
+    policyLines.push(`  TO ${ownerTo}`)
+    policyLines.push(`  USING (${ownerPredicate});`)
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_insert ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_insert`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR INSERT`)
+    policyLines.push(`  TO ${ownerTo}`)
+    policyLines.push(`  WITH CHECK (${ownerPredicate});`)
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_update ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_update`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR UPDATE`)
+    policyLines.push(`  TO ${ownerTo}`)
+    policyLines.push(`  USING (${ownerPredicate})`)
+    policyLines.push(`  WITH CHECK (${ownerPredicate});`)
+    policyLines.push(``)
+    policyLines.push(`DROP POLICY IF EXISTS ${base}_delete ON ${dbSchema}.${name};`)
+    policyLines.push(`CREATE POLICY ${base}_delete`)
+    policyLines.push(`  ON ${dbSchema}.${name}`)
+    policyLines.push(`  AS PERMISSIVE`)
+    policyLines.push(`  FOR DELETE`)
+    policyLines.push(`  TO ${ownerTo}`)
+    policyLines.push(`  USING (${ownerPredicate});`)
+  }
+
   return `-- ═══════════════════════════════════════════════════════════════
 -- ${name} — RLS policies
 -- Generated by code-gen v2
@@ -747,13 +828,7 @@ ALTER TABLE ${dbSchema}.${name} ENABLE ROW LEVEL SECURITY;
 GRANT USAGE ON SCHEMA ${dbSchema} TO ${roles};
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${dbSchema}.${name} TO ${roles};
 
-DROP POLICY IF EXISTS ${policyName} ON ${dbSchema}.${name};
-CREATE POLICY ${policyName}
-  ON ${dbSchema}.${name}
-  FOR ALL
-  TO ${roles}
-  USING (true)
-  WITH CHECK (true);`
+${policyLines.join('\n')}`
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -782,7 +857,7 @@ function generateTypes(name: string, _table: TableSchema, a: TableAnalysis): str
   lines.push('')
 
   // Options interface
-  lines.push(`export interface ${P}Options { url: string; key: string; schema?: string; graphqlUrl?: string;${a.hasEmbedder ? ' embedder: Embedder;' : ''} }\n`)
+  lines.push(`export interface ${P}Options { url: string; key: string; schema?: string; graphqlUrl?: string; accessToken?: string;${a.hasEmbedder ? ' embedder: Embedder;' : ''} }\n`)
 
   // Insert interface — excludes auto-generated columns
   lines.push(`export interface ${P}Insert {`)
@@ -849,16 +924,19 @@ function generateSDK(name: string, _table: TableSchema, a: TableAnalysis, defaul
 
   // Class open
   L.push(`export class ${P}Sdk {`)
-  L.push(`  private supabase: SupabaseClient;`)
+  L.push(`  private supabase: SupabaseClient<any, string, string, any, any>;`)
   L.push(`  private apiKey: string;`)
+  L.push(`  private authToken: string;`)
   L.push(`  private graphqlUrl: string;`)
   if (a.hasEmbedder) L.push(`  private embedder: Embedder;`)
   L.push('')
 
   // ── Constructor ──
   L.push(`  constructor(opts: ${P}Options) {`)
-  L.push(`    this.supabase = createClient(opts.url, opts.key, { auth: { persistSession: false, autoRefreshToken: false }, db: { schema: opts.schema ?? "${defaultDbSchema}" } });`)
+  L.push(`    const globalHeaders = opts.accessToken ? { Authorization: \`Bearer \${opts.accessToken}\` } : undefined;`)
+  L.push(`    this.supabase = createClient(opts.url, opts.key, { auth: { persistSession: false, autoRefreshToken: false }, db: { schema: opts.schema ?? "${defaultDbSchema}" }, global: globalHeaders ? { headers: globalHeaders } : undefined });`)
   L.push(`    this.apiKey = opts.key;`)
+  L.push(`    this.authToken = opts.accessToken ?? opts.key;`)
   L.push(`    this.graphqlUrl = opts.graphqlUrl ?? \`\${opts.url.replace(/\\/+$/, "")}/graphql/v1\`;`)
   if (a.hasEmbedder) L.push(`    this.embedder = opts.embedder;`)
   L.push(`  }\n`)
@@ -874,7 +952,7 @@ function generateSDK(name: string, _table: TableSchema, a: TableAnalysis, defaul
   L.push(`      headers: {`)
   L.push(`        "Content-Type": "application/json",`)
   L.push(`        apikey: this.apiKey,`)
-  L.push(`        Authorization: \`Bearer \${this.apiKey}\``)
+  L.push(`        Authorization: \`Bearer \${this.authToken}\``)
   L.push(`      },`)
   L.push(`      body: JSON.stringify({ query, variables })`)
   L.push(`    });`)
@@ -1112,17 +1190,28 @@ function sampleValueForTsType(tsType: string, pgType?: string): string {
 function generateExampleFile(schema: Schema, tables: Array<{ name: string; analysis: TableAnalysis }>, defaultDbSchema = 'public'): string {
   const lines: string[] = []
   const hasEmbedder = tables.some(t => t.analysis.hasEmbedder)
+  const requiresAuthenticatedToken = tables.some(t =>
+    t.analysis.accessRoles.length === 1 && t.analysis.accessRoles[0] === 'authenticated'
+  )
   const embedDim = schema.config?.embed_dim ?? 1536
 
   lines.push(`import "dotenv/config";`)
+  if (requiresAuthenticatedToken) {
+    lines.push(`import { createClient } from "@supabase/supabase-js";`)
+  }
   for (const t of tables) {
     lines.push(`import { ${t.analysis.pascal}Sdk } from "./sdk/${t.name}-sdk";`)
   }
   lines.push('')
   lines.push(`/** ---------------- Config ---------------- */`)
   lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
-  lines.push(`const SUPABASE_KEY = process.env.SUPABASE_KEY ?? "";`)
+  lines.push(`const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? process.env.SUPABASE_KEY ?? "";`)
+  lines.push(`const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";`)
   lines.push(`const SUPABASE_DB_SCHEMA = process.env.SUPABASE_DB_SCHEMA ?? "${defaultDbSchema}";`)
+  if (requiresAuthenticatedToken) {
+    lines.push(`const SUPABASE_USER_EMAIL = process.env.SUPABASE_USER_EMAIL ?? "";`)
+    lines.push(`const SUPABASE_USER_PASSWORD = process.env.SUPABASE_USER_PASSWORD ?? "";`)
+  }
 
   if (hasEmbedder) {
     lines.push(`const EMBEDDING_DIMENSIONS = ${embedDim};`)
@@ -1136,10 +1225,33 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
     lines.push(`};`)
   }
 
+  if (requiresAuthenticatedToken) {
+    lines.push('')
+    lines.push(`/** Exchange email/password for a user JWT used for authenticated RLS requests */`)
+    lines.push(`async function getAuthenticatedSession(): Promise<{ accessToken: string; userId: string }> {`)
+    lines.push(`  if (!SUPABASE_USER_EMAIL || !SUPABASE_USER_PASSWORD) {`)
+    lines.push(`    throw new Error("Missing SUPABASE_USER_EMAIL or SUPABASE_USER_PASSWORD");`)
+    lines.push(`  }`)
+    lines.push(`  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false }, db: { schema: SUPABASE_DB_SCHEMA } });`)
+    lines.push(`  const { data, error } = await authClient.auth.signInWithPassword({ email: SUPABASE_USER_EMAIL, password: SUPABASE_USER_PASSWORD });`)
+    lines.push(`  if (error) throw new Error(\`Failed to sign in test user: \${error.message}\`);`)
+    lines.push(`  const accessToken = data.session?.access_token;`)
+    lines.push(`  if (!accessToken) throw new Error("Missing access token in auth response");`)
+    lines.push(`  const userId = data.user?.id ?? data.session?.user?.id;`)
+    lines.push(`  if (!userId) throw new Error("Missing user id in auth response");`)
+    lines.push(`  return { accessToken, userId };`)
+    lines.push(`}`)
+  }
+
   for (const t of tables) {
     const a = t.analysis
     const camel = toCamel(a.pascal)
     const fnName = `run${a.pascal}Examples`
+    const authMode: 'authenticated' | 'service_role' | 'anon' = (() => {
+      if (a.accessRoles.length === 1 && a.accessRoles[0] === 'authenticated') return 'authenticated'
+      if (a.accessRoles.includes('service_role')) return 'service_role'
+      return 'anon'
+    })()
     const insertCols = a.columns.filter(c => !c.isAutoGenerated && !c.isOptionalInsert)
     const updateCol = a.columns.find(c => !c.isAutoGenerated && !c.primary) ?? null
     const idAccess = `created.${a.primary.name}`
@@ -1150,14 +1262,32 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
       !['jsonb', 'json'].includes(c.type.toLowerCase()) &&
       !c.type.endsWith('[]')
     )
+    const updateValueExpr = updateCol
+      ? (authMode === 'authenticated' && updateCol.name === 'user_id'
+          ? 'authSession?.userId ?? crypto.randomUUID()'
+          : sampleValueForTsType(updateCol.tsType, updateCol.type))
+      : null
 
     lines.push('')
     lines.push(`/** ---------------- Sample Data ---------------- */`)
-    lines.push(`const ${camel}InsertSampleData = {`)
-    for (const col of insertCols) {
-      lines.push(`  ${col.name}: ${sampleValueForTsType(col.tsType, col.type)},`)
+    const hasUserIdInsert = insertCols.some(c => c.name === 'user_id')
+    if (authMode === 'authenticated' && hasUserIdInsert) {
+      lines.push(`const ${camel}InsertSampleData = (userId: string) => ({`)
+      for (const col of insertCols) {
+        if (col.name === 'user_id') {
+          lines.push(`  user_id: userId,`)
+        } else {
+          lines.push(`  ${col.name}: ${sampleValueForTsType(col.tsType, col.type)},`)
+        }
+      }
+      lines.push(`});`)
+    } else {
+      lines.push(`const ${camel}InsertSampleData = {`)
+      for (const col of insertCols) {
+        lines.push(`  ${col.name}: ${sampleValueForTsType(col.tsType, col.type)},`)
+      }
+      lines.push(`};`)
     }
-    lines.push(`};`)
     lines.push('')
     lines.push(`/** Cursor-based pagination query: fetches ${queryCols} per edge */`)
     lines.push(`const ${camel}PageSampleQuery = \`query ${a.pascal}Example($first: Int = 2, $after: Cursor) {`)
@@ -1168,27 +1298,52 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
     lines.push(`}\`;`)
     if (a.hasSearch) {
       lines.push('')
-      lines.push(`const ${camel}SearchSampleData = {`)
-      lines.push(`  query: "example query",`)
-      lines.push(`  threshold: 0.1,`)
-      lines.push(`  topK: 5,`)
-      if (conditionCol) {
-        lines.push(`  conditions: [{ field: "${conditionCol.name}", op: "eq" as const, value: ${sampleValueForTsType(conditionCol.tsType, conditionCol.type)} }],`)
+      if (authMode === 'authenticated' && conditionCol?.name === 'user_id') {
+        lines.push(`const ${camel}SearchSampleData = (userId: string) => ({`)
+        lines.push(`  query: "example query",`)
+        lines.push(`  threshold: 0.1,`)
+        lines.push(`  topK: 5,`)
+        lines.push(`  conditions: [{ field: "user_id", op: "eq" as const, value: userId }],`)
+        lines.push(`});`)
+      } else {
+        lines.push(`const ${camel}SearchSampleData = {`)
+        lines.push(`  query: "example query",`)
+        lines.push(`  threshold: 0.1,`)
+        lines.push(`  topK: 5,`)
+        if (conditionCol) {
+          lines.push(`  conditions: [{ field: "${conditionCol.name}", op: "eq" as const, value: ${sampleValueForTsType(conditionCol.tsType, conditionCol.type)} }],`)
+        }
+        lines.push(`};`)
       }
-      lines.push(`};`)
     }
 
     lines.push('')
     lines.push(`/** ---------------- Examples ---------------- */`)
-    lines.push(`async function ${fnName}(): Promise<void> {`)
-    if (a.hasEmbedder) {
-      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_KEY, schema: SUPABASE_DB_SCHEMA, embedder });`)
+    lines.push(`async function ${fnName}(authSession?: { accessToken: string; userId: string }): Promise<void> {`)
+    if (authMode === 'authenticated') {
+      lines.push(`  const clientKey = SUPABASE_ANON_KEY;`)
+      lines.push(`  const accessToken = authSession?.accessToken;`)
+    } else if (authMode === 'service_role') {
+      lines.push(`  if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");`)
+      lines.push(`  const clientKey = SUPABASE_SERVICE_ROLE_KEY;`)
+      lines.push(`  const accessToken = undefined;`)
     } else {
-      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_KEY, schema: SUPABASE_DB_SCHEMA });`)
+      lines.push(`  const clientKey = SUPABASE_ANON_KEY;`)
+      lines.push(`  const accessToken = undefined;`)
+    }
+    if (a.hasEmbedder) {
+      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: clientKey, schema: SUPABASE_DB_SCHEMA, accessToken, embedder });`)
+    } else {
+      lines.push(`  const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: clientKey, schema: SUPABASE_DB_SCHEMA, accessToken });`)
     }
     lines.push('')
     lines.push(`  /** Insert a new row and log its id */`)
-    lines.push(`  const created = await sdk.insert(${camel}InsertSampleData);`)
+    if (authMode === 'authenticated' && hasUserIdInsert) {
+      lines.push(`  if (!authSession?.userId) throw new Error("Missing authenticated user id for user_id-backed insert");`)
+      lines.push(`  const created = await sdk.insert(${camel}InsertSampleData(authSession.userId));`)
+    } else {
+      lines.push(`  const created = await sdk.insert(${camel}InsertSampleData);`)
+    }
     lines.push(`  console.log("[${t.name}] created:", created.${a.primary.name});`)
     lines.push(``)
     lines.push(`  /** Fetch the row by id */`)
@@ -1196,7 +1351,7 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
     lines.push(`  console.log("[${t.name}] fetched:", fetched ? "found" : "not found");`)
     lines.push(``)
     lines.push(`  /** Update a single field on the row */`)
-    lines.push(`  const updated = await sdk.update(${idAccess}, ${updateCol ? `{ ${updateCol.name}: ${sampleValueForTsType(updateCol.tsType, updateCol.type)} }` : '{}'});`)
+    lines.push(`  const updated = await sdk.update(${idAccess}, ${updateCol ? `{ ${updateCol.name}: ${updateValueExpr} }` : '{}'});`)
     lines.push(`  console.log("[${t.name}] updated:", updated.${a.primary.name});`)
     lines.push(``)
     lines.push(`  /** Fetch one page of results (limit: 2) */`)
@@ -1214,7 +1369,12 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
     if (a.hasSearch) {
       lines.push(``)
       lines.push(`  /** Vector search with a similarity threshold and optional field filters */`)
-      lines.push(`  const searchRows = await sdk.search(${camel}SearchSampleData);`)
+      if (authMode === 'authenticated' && conditionCol?.name === 'user_id') {
+        lines.push(`  if (!authSession?.userId) throw new Error("Missing authenticated user id for user_id-backed search");`)
+        lines.push(`  const searchRows = await sdk.search(${camel}SearchSampleData(authSession.userId));`)
+      } else {
+        lines.push(`  const searchRows = await sdk.search(${camel}SearchSampleData);`)
+      }
       lines.push(`  console.log("[${t.name}] search rows:", searchRows.length);`)
     }
 
@@ -1286,9 +1446,14 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
   lines.push('')
   lines.push(`/** ---------------- Entry Point ---------------- */`)
   lines.push(`async function main(): Promise<void> {`)
-  lines.push(`  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error("Missing SUPABASE_URL or SUPABASE_KEY");`)
+  lines.push(`  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY");`)
+  if (requiresAuthenticatedToken) {
+    lines.push(`  const authSession = await getAuthenticatedSession();`)
+  } else {
+    lines.push(`  const authSession: { accessToken: string; userId: string } | undefined = undefined;`)
+  }
   for (const t of tables) {
-  lines.push(`  await run${t.analysis.pascal}Examples();`)
+  lines.push(`  await run${t.analysis.pascal}Examples(authSession);`)
   }
   lines.push(`}`)
   lines.push('')
@@ -1334,6 +1499,12 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
     const sql = generateSQL(name, table, analysis, tableNames, dbSchema)
     await writeFile(path.join(dir, `sql/${name}.sql`), sql)
     console.log(`  ✓ ${name}.sql`)
+
+    const policiesSql = generatePoliciesSQL(name, analysis, dbSchema)
+    if (policiesSql) {
+      await writeFile(path.join(dir, `policies/${name}.policy.sql`), policiesSql)
+      console.log(`  ✓ ${name}.policy.sql`)
+    }
 
     // TypeScript types
     const types = generateTypes(name, table, analysis)
