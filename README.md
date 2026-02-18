@@ -33,9 +33,3 @@ Manually writing these for each table is repetitive and error-prone. This tool a
 ```bash
 bun gen.ts schema.yaml
 ```
-
-## 📦 Dependencies
-
-- [Supabase](https://supabase.com/)
-- [YAML](https://yaml.org/)
-- [Zod](https://zod.dev/)

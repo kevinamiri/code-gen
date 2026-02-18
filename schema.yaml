@@ -15,10 +15,6 @@ tables:
         type: uuid
         nullable: false
 
-      - name: organization_id
-        type: uuid
-        nullable: false
-
       - name: title
         type: text
         nullable: false
@@ -70,12 +66,6 @@ tables:
       - columns: [embedding]
         type: hnsw
         ops: vector_cosine_ops
-      
-      - columns: [user_id]
-        type: btree
-      
-      - columns: [organization_id]
-        type: btree
 
 
 # Global configuration
