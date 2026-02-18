@@ -1,0 +1,53 @@
+{
+  "name": "supabase-codegen",
+  "version": "1.0.0",
+  "description": "Schema-driven code generator for Supabase with specialized patterns",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "generate": "ts-node supabase_codegen.ts schema.yaml ./generated",
+    "generate:watch": "nodemon --watch schema.yaml --exec npm run generate",
+    "dev": "ts-node-dev --respawn supabase_codegen.ts",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write \"**/*.{ts,js,json,md}\"",
+    "test": "jest",
+    "clean": "rm -rf generated dist"
+  },
+  "keywords": [
+    "supabase",
+    "code-generator",
+    "repository-pattern",
+    "pgvector",
+    "typescript",
+    "orm",
+    "database"
+  ],
+  "author": "Kevin Amiri",
+  "license": "MIT",
+  "dependencies": {
+    "@openai/agents": "^0.4.11",
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^17.3.1",
+    "openai": "^6.22.0",
+    "yaml": "^2.3.4",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2",
+    "prettier": "^3.1.0",
+    "ts-jest": "^29.1.1",
+    "ts-node": "^10.9.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

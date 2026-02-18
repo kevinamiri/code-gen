@@ -1,0 +1,84 @@
+# Example Supabase Schema Configuration
+# This file defines tables and their specialized patterns
+
+tables:
+  prompts:
+    description: "Prompt storage with vector embeddings for semantic search"
+    columns:
+      - name: id
+        type: uuid
+        primary: true
+        nullable: false
+        default: gen_random_uuid()
+  
+      - name: user_id
+        type: uuid
+        nullable: false
+
+      - name: organization_id
+        type: uuid
+        nullable: false
+
+      - name: title
+        type: text
+        nullable: false
+
+      - name: user_instruction
+        type: text
+        nullable: false
+
+      - name: system_instruction
+        type: text
+        nullable: false
+      
+      - name: embedding
+        type: vector(1536)
+        nullable: true
+        embed_source: user_instruction
+        patterns:
+          - similarity_search
+        index: hnsw
+
+      - name: response
+        type: jsonb
+        nullable: true
+        default: '{}'
+      
+      - name: metadata
+        type: jsonb
+        nullable: true
+        default: '{}'
+      
+      - name: tags
+        type: text[]
+        nullable: true
+        patterns:
+          - array_contains
+          - array_overlap
+      
+      - name: created_at
+        type: timestamptz
+        nullable: false
+        default: now()
+      
+      - name: updated_at
+        type: timestamptz
+        nullable: false
+        default: now()
+    
+    indexes:
+      - columns: [embedding]
+        type: hnsw
+        ops: vector_cosine_ops
+      
+      - columns: [user_id]
+        type: btree
+      
+      - columns: [organization_id]
+        type: btree
+
+
+# Global configuration
+config:
+  output_dir: ./generated
+  embed_dim: 1536
