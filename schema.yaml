@@ -1,7 +1,7 @@
 tables:
   prompts:
     description: "Prompt storage (user-owned, authenticated only)"
-    access: [authenticated]
+    access: [authenticated, service_role]
     columns:
       - name: id
         type: uuid
