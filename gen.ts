@@ -1187,10 +1187,20 @@ function sampleValueForTsType(tsType: string, pgType?: string): string {
   return `null`
 }
 
-function generateExampleFile(schema: Schema, tables: Array<{ name: string; analysis: TableAnalysis }>, defaultDbSchema = 'public'): string {
+function generateExampleFile(
+  schema: Schema,
+  tables: Array<{ name: string; analysis: TableAnalysis }>,
+  defaultDbSchema = 'public',
+  targetRole?: 'anon' | 'authenticated' | 'service_role'
+): string {
   const lines: string[] = []
   const hasEmbedder = tables.some(t => t.analysis.hasEmbedder)
-  const requiresAuthenticatedToken = tables.some(t => t.analysis.accessRoles.includes('authenticated'))
+  const requiresAuthenticatedToken = targetRole
+    ? targetRole === 'authenticated'
+    : tables.some(t => t.analysis.accessRoles.includes('authenticated'))
+  const requiresServiceRoleKey = targetRole
+    ? targetRole === 'service_role'
+    : tables.some(t => t.analysis.accessRoles.includes('service_role'))
   const embedDim = schema.config?.embed_dim ?? 1536
 
   lines.push(`import "dotenv/config";`)
@@ -1204,7 +1214,9 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
   lines.push(`/** ---------------- Config ---------------- */`)
   lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
   lines.push(`const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? process.env.SUPABASE_KEY ?? "";`)
-  lines.push(`const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";`)
+  if (requiresServiceRoleKey) {
+    lines.push(`const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";`)
+  }
   lines.push(`const SUPABASE_DB_SCHEMA = process.env.SUPABASE_DB_SCHEMA ?? "${defaultDbSchema}";`)
   if (requiresAuthenticatedToken) {
     lines.push(`const SUPABASE_USER_EMAIL = process.env.SUPABASE_USER_EMAIL ?? "";`)
@@ -1245,7 +1257,6 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
 
   lines.push('')
   lines.push(`type ExampleAccessRole = "anon" | "authenticated" | "service_role";`)
-  lines.push(`type ExampleRoleContext = { role: ExampleAccessRole; clientKey: string; accessToken?: string; userId?: string };`)
 
   for (const t of tables) {
     const a = t.analysis
@@ -1313,141 +1324,160 @@ function generateExampleFile(schema: Schema, tables: Array<{ name: string; analy
       }
     }
 
+    const pushExampleOps = (sdkVar: string, userIdExpr: string) => {
+      lines.push('')
+      lines.push(`    /** Insert a new row and log its id */`)
+      if (hasUserIdInsert) {
+        lines.push(`    const created = await ${sdkVar}.insert(${camel}InsertSampleData(${userIdExpr}));`)
+      } else {
+        lines.push(`    const created = await ${sdkVar}.insert(${camel}InsertSampleData);`)
+      }
+      lines.push(`    console.log("[${t.name}] created:", created.${a.primary.name});`)
+      lines.push(``)
+      lines.push(`    /** Fetch the row by id */`)
+      lines.push(`    const fetched = await ${sdkVar}.get(${idAccess});`)
+      lines.push(`    console.log("[${t.name}] fetched:", fetched ? "found" : "not found");`)
+      lines.push(``)
+      lines.push(`    /** Update a single field on the row */`)
+      lines.push(`    const updated = await ${sdkVar}.update(${idAccess}, ${updateCol ? `{ ${updateCol.name}: ${updateCol.name === 'user_id' ? userIdExpr : sampleValueForTsType(updateCol.tsType, updateCol.type)} }` : '{}'});`)
+      lines.push(`    console.log("[${t.name}] updated:", updated.${a.primary.name});`)
+      lines.push(``)
+      lines.push(`    /** Fetch one page of results (limit: 2) */`)
+      lines.push(`    const page = await ${sdkVar}.listPageGraphql({ first: 2 });`)
+      lines.push(`    console.log("[${t.name}] page edges:", page.edges.length);`)
+      lines.push(``)
+      lines.push(`    /** Fetch all rows using auto-pagination (capped at 1 page for this example) */`)
+      lines.push(`    const allRows = await ${sdkVar}.listAllGraphql({ first: 2, maxPages: 1 });`)
+      lines.push(`    console.log("[${t.name}] all rows:", allRows.length);`)
+      lines.push(``)
+      lines.push(`    /** Run a raw GraphQL query with auto-pagination */`)
+      lines.push(`    const paginated = await ${sdkVar}.paginateGraphqlQuery({ query: ${camel}PageSampleQuery, connectionPath: "${t.name}Collection", first: 2, maxPages: 1 });`)
+      lines.push(`    console.log("[${t.name}] paginated rows:", paginated.length);`)
+
+      if (a.hasSearch) {
+        lines.push(``)
+        lines.push(`    /** Vector search with a similarity threshold and optional field filters */`)
+        if (conditionCol?.name === 'user_id') {
+          lines.push(`    const searchRows = await ${sdkVar}.search(${camel}SearchSampleData(${userIdExpr}));`)
+        } else {
+          lines.push(`    const searchRows = await ${sdkVar}.search(${camel}SearchSampleData);`)
+        }
+        lines.push(`    console.log("[${t.name}] search rows:", searchRows.length);`)
+      }
+
+      for (const mc of a.mergeCols) {
+        lines.push(``)
+        lines.push(`    /** Merge data into the \`${mc.name}\` JSONB column via RPC; skip if the function doesn't exist */`)
+        lines.push(`    try {`)
+        lines.push(`      await ${sdkVar}.update${toPascal(mc.name)}(${idAccess}, { merged: true });`)
+        lines.push(`      console.log("[${t.name}] update${toPascal(mc.name)}: ok");`)
+        lines.push(`    } catch (error) {`)
+        lines.push(`      if (error instanceof Error && error.message.includes("Could not find the function")) {`)
+        lines.push(`        console.log("[${t.name}] update${toPascal(mc.name)}: skipped (RPC not found) Details:", error.message);`)
+        lines.push(`      } else {`)
+        lines.push(`        throw error;`)
+        lines.push(`      }`)
+        lines.push(`    }`)
+      }
+
+      for (const ac of a.appendCols) {
+        lines.push(``)
+        lines.push(`    /** Append an entry to the \`${ac.name}\` JSONB array via RPC; skip if the function doesn't exist */`)
+        lines.push(`    try {`)
+        lines.push(`      await ${sdkVar}.append${toPascal(ac.name)}(${idAccess}, { event: "example" });`)
+        lines.push(`      console.log("[${t.name}] append${toPascal(ac.name)}: ok");`)
+        lines.push(`    } catch (error) {`)
+        lines.push(`      if (error instanceof Error && error.message.includes("Could not find the function")) {`)
+        lines.push(`        console.log("[${t.name}] append${toPascal(ac.name)}: skipped (RPC not found) Details:", error.message);`)
+        lines.push(`      } else {`)
+        lines.push(`        throw error;`)
+        lines.push(`      }`)
+        lines.push(`    }`)
+      }
+
+      for (const sc of a.statsCols) {
+        lines.push(``)
+        lines.push(`    /** Fetch stats from \`${sc.name}\` via RPC; skip if the function doesn't exist */`)
+        lines.push(`    try {`)
+        lines.push(`      const stats = await ${sdkVar}.${toCamel(sc.name)}Stats("score", {});`)
+        lines.push(`      console.log("[${t.name}] ${toCamel(sc.name)}Stats:", Boolean(stats));`)
+        lines.push(`    } catch (error) {`)
+        lines.push(`      if (error instanceof Error && error.message.includes("Could not find the function")) {`)
+        lines.push(`        console.log("[${t.name}] ${toCamel(sc.name)}Stats: skipped (RPC not found) Details:", error.message);`)
+        lines.push(`      } else {`)
+        lines.push(`        throw error;`)
+        lines.push(`      }`)
+        lines.push(`    }`)
+      }
+
+      for (const ac of a.arrayCols) {
+        const sampleArray = sampleValueForTsType(mapTsType(ac.type))
+        if (ac.resolvedPatterns.includes('array_overlap')) {
+          lines.push(``)
+          lines.push(`    /** Filter rows where the \`${ac.name}\` array overlaps with the given list (any match) */`)
+          lines.push(`    const overlapRows = await ${sdkVar}.filterBy${toPascal(ac.name)}Overlaps(${sampleArray});`)
+          lines.push(`    console.log("[${t.name}] filterBy${toPascal(ac.name)}Overlaps rows:", overlapRows.length);`)
+        }
+        if (ac.resolvedPatterns.includes('array_contains')) {
+          lines.push(``)
+          lines.push(`    /** Filter rows where the \`${ac.name}\` array contains all values in the given list */`)
+          lines.push(`    const containsRows = await ${sdkVar}.filterBy${toPascal(ac.name)}Contains(${sampleArray});`)
+          lines.push(`    console.log("[${t.name}] filterBy${toPascal(ac.name)}Contains rows:", containsRows.length);`)
+        }
+      }
+
+      lines.push(``)
+      lines.push(`    /** Clean up: delete the row created at the start */`)
+      lines.push(`    await ${sdkVar}.delete(${idAccess});`)
+      lines.push(`    console.log("[${t.name}] deleted:", created.${a.primary.name});`)
+    }
+
     lines.push('')
     lines.push(`/** ---------------- Examples ---------------- */`)
     lines.push(`async function ${fnName}(authSession?: { accessToken: string; userId: string }): Promise<void> {`)
-    lines.push(`  const roleContexts: ExampleRoleContext[] = [];`)
-    lines.push(``)
     lines.push(`  /**`)
     lines.push(`   * Key/token mapping by role:`)
     lines.push(`   * - anon: SUPABASE_ANON_KEY, no user JWT`)
     lines.push(`   * - authenticated: SUPABASE_ANON_KEY + user JWT (authSession.accessToken)`)
     lines.push(`   * - service_role: SUPABASE_SERVICE_ROLE_KEY, no user JWT`)
     lines.push(`   */`)
-    lines.push(`  if (${camel}AccessRoles.length === 0 || ${camel}AccessRoles.includes("anon")) {`)
-    lines.push(`    roleContexts.push({ role: "anon", clientKey: SUPABASE_ANON_KEY });`)
-    lines.push(`  }`)
-    lines.push(`  if (${camel}AccessRoles.includes("authenticated")) {`)
-    lines.push(`    if (!authSession?.accessToken) throw new Error("Missing authenticated session for authenticated role examples");`)
-    lines.push(`    roleContexts.push({ role: "authenticated", clientKey: SUPABASE_ANON_KEY, accessToken: authSession.accessToken, userId: authSession.userId });`)
-    lines.push(`  }`)
-    lines.push(`  if (${camel}AccessRoles.includes("service_role")) {`)
-    lines.push(`    if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");`)
-    lines.push(`    roleContexts.push({ role: "service_role", clientKey: SUPABASE_SERVICE_ROLE_KEY });`)
-    lines.push(`  }`)
-    lines.push(``)
     lines.push(`  console.log("[${t.name}] access roles:", ${camel}AccessRoles.length ? ${camel}AccessRoles.join(", ") : "none (defaulting to anon)");`)
     lines.push(``)
-    lines.push(`  for (const roleContext of roleContexts) {`)
-    lines.push(`    console.log(\`[${t.name}][\${roleContext.role}] key=\${roleContext.role === "service_role" ? "SUPABASE_SERVICE_ROLE_KEY" : "SUPABASE_ANON_KEY"}, token=\${roleContext.accessToken ? "user JWT" : "none"}\`);`)
-    if (a.hasEmbedder) {
-      lines.push(`    const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: roleContext.clientKey, schema: SUPABASE_DB_SCHEMA, accessToken: roleContext.accessToken, embedder });`)
-    } else {
-      lines.push(`    const sdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: roleContext.clientKey, schema: SUPABASE_DB_SCHEMA, accessToken: roleContext.accessToken });`)
-    }
-    lines.push('')
-    lines.push(`    /** Insert a new row and log its id */`)
-    if (hasUserIdInsert) {
-      lines.push(`    const created = await sdk.insert(${camel}InsertSampleData(roleContext.userId));`)
-    } else {
-      lines.push(`    const created = await sdk.insert(${camel}InsertSampleData);`)
-    }
-    lines.push(`    console.log("[${t.name}] created:", created.${a.primary.name});`)
-    lines.push(``)
-    lines.push(`    /** Fetch the row by id */`)
-    lines.push(`    const fetched = await sdk.get(${idAccess});`)
-    lines.push(`    console.log("[${t.name}] fetched:", fetched ? "found" : "not found");`)
-    lines.push(``)
-    lines.push(`    /** Update a single field on the row */`)
-    lines.push(`    const updated = await sdk.update(${idAccess}, ${updateCol ? `{ ${updateCol.name}: ${updateCol.name === 'user_id' ? 'roleContext.userId ?? crypto.randomUUID()' : sampleValueForTsType(updateCol.tsType, updateCol.type)} }` : '{}'});`)
-    lines.push(`    console.log("[${t.name}] updated:", updated.${a.primary.name});`)
-    lines.push(``)
-    lines.push(`    /** Fetch one page of results (limit: 2) */`)
-    lines.push(`    const page = await sdk.listPageGraphql({ first: 2 });`)
-    lines.push(`    console.log("[${t.name}] page edges:", page.edges.length);`)
-    lines.push(``)
-    lines.push(`    /** Fetch all rows using auto-pagination (capped at 1 page for this example) */`)
-    lines.push(`    const allRows = await sdk.listAllGraphql({ first: 2, maxPages: 1 });`)
-    lines.push(`    console.log("[${t.name}] all rows:", allRows.length);`)
-    lines.push(``)
-    lines.push(`    /** Run a raw GraphQL query with auto-pagination */`)
-    lines.push(`    const paginated = await sdk.paginateGraphqlQuery({ query: ${camel}PageSampleQuery, connectionPath: "${t.name}Collection", first: 2, maxPages: 1 });`)
-    lines.push(`    console.log("[${t.name}] paginated rows:", paginated.length);`)
-
-    if (a.hasSearch) {
-      lines.push(``)
-      lines.push(`    /** Vector search with a similarity threshold and optional field filters */`)
-      if (conditionCol?.name === 'user_id') {
-        lines.push(`    const searchRows = await sdk.search(${camel}SearchSampleData(roleContext.userId));`)
+    if (!targetRole || targetRole === 'anon') {
+      lines.push(`  if (${camel}AccessRoles.length === 0 || ${camel}AccessRoles.includes("anon")) {`)
+      lines.push(`    console.log("[${t.name}][anon] key=SUPABASE_ANON_KEY, token=none");`)
+      if (a.hasEmbedder) {
+        lines.push(`    const anonSdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_ANON_KEY, schema: SUPABASE_DB_SCHEMA, embedder });`)
       } else {
-        lines.push(`    const searchRows = await sdk.search(${camel}SearchSampleData);`)
+        lines.push(`    const anonSdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_ANON_KEY, schema: SUPABASE_DB_SCHEMA });`)
       }
-      lines.push(`    console.log("[${t.name}] search rows:", searchRows.length);`)
+      pushExampleOps('anonSdk', 'crypto.randomUUID()')
+      lines.push(`  }`)
     }
-
-    for (const mc of a.mergeCols) {
-      lines.push(``)
-      lines.push(`    /** Merge data into the \`${mc.name}\` JSONB column via RPC; skip if the function doesn't exist */`)
-      lines.push(`    try {`)
-      lines.push(`      await sdk.update${toPascal(mc.name)}(${idAccess}, { merged: true });`)
-      lines.push(`      console.log("[${t.name}] update${toPascal(mc.name)}: ok");`)
-      lines.push(`    } catch (error) {`)
-      lines.push(`      if (error instanceof Error && error.message.includes("Could not find the function")) {`)
-      lines.push(`        console.log("[${t.name}] update${toPascal(mc.name)}: skipped (RPC not found) Details:", error.message);`)
-      lines.push(`      } else {`)
-      lines.push(`        throw error;`)
-      lines.push(`      }`)
-      lines.push(`    }`)
-    }
-    for (const ac of a.appendCols) {
-      lines.push(``)
-      lines.push(`    /** Append an entry to the \`${ac.name}\` JSONB array via RPC; skip if the function doesn't exist */`)
-      lines.push(`    try {`)
-      lines.push(`      await sdk.append${toPascal(ac.name)}(${idAccess}, { event: "example" });`)
-      lines.push(`      console.log("[${t.name}] append${toPascal(ac.name)}: ok");`)
-      lines.push(`    } catch (error) {`)
-      lines.push(`      if (error instanceof Error && error.message.includes("Could not find the function")) {`)
-      lines.push(`        console.log("[${t.name}] append${toPascal(ac.name)}: skipped (RPC not found) Details:", error.message);`)
-      lines.push(`      } else {`)
-      lines.push(`        throw error;`)
-      lines.push(`      }`)
-      lines.push(`    }`)
-    }
-    for (const sc of a.statsCols) {
-      lines.push(``)
-      lines.push(`    /** Fetch stats from \`${sc.name}\` via RPC; skip if the function doesn't exist */`)
-      lines.push(`    try {`)
-      lines.push(`      const stats = await sdk.${toCamel(sc.name)}Stats("score", {});`)
-      lines.push(`      console.log("[${t.name}] ${toCamel(sc.name)}Stats:", Boolean(stats));`)
-      lines.push(`    } catch (error) {`)
-      lines.push(`      if (error instanceof Error && error.message.includes("Could not find the function")) {`)
-      lines.push(`        console.log("[${t.name}] ${toCamel(sc.name)}Stats: skipped (RPC not found) Details:", error.message);`)
-      lines.push(`      } else {`)
-      lines.push(`        throw error;`)
-      lines.push(`      }`)
-      lines.push(`    }`)
-    }
-    for (const ac of a.arrayCols) {
-      const sampleArray = sampleValueForTsType(mapTsType(ac.type))
-      if (ac.resolvedPatterns.includes('array_overlap')) {
-        lines.push(``)
-        lines.push(`    /** Filter rows where the \`${ac.name}\` array overlaps with the given list (any match) */`)
-        lines.push(`    const overlapRows = await sdk.filterBy${toPascal(ac.name)}Overlaps(${sampleArray});`)
-        lines.push(`    console.log("[${t.name}] filterBy${toPascal(ac.name)}Overlaps rows:", overlapRows.length);`)
+    if (!targetRole || targetRole === 'authenticated') {
+      lines.push(`  if (${camel}AccessRoles.includes("authenticated")) {`)
+      lines.push(`    if (!authSession?.accessToken) throw new Error("Missing authenticated session for authenticated role examples");`)
+      lines.push(`    console.log("[${t.name}][authenticated] key=SUPABASE_ANON_KEY, token=user JWT");`)
+      if (a.hasEmbedder) {
+        lines.push(`    const authenticatedSdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_ANON_KEY, schema: SUPABASE_DB_SCHEMA, accessToken: authSession.accessToken, embedder });`)
+      } else {
+        lines.push(`    const authenticatedSdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_ANON_KEY, schema: SUPABASE_DB_SCHEMA, accessToken: authSession.accessToken });`)
       }
-      if (ac.resolvedPatterns.includes('array_contains')) {
-        lines.push(``)
-        lines.push(`    /** Filter rows where the \`${ac.name}\` array contains all values in the given list */`)
-        lines.push(`    const containsRows = await sdk.filterBy${toPascal(ac.name)}Contains(${sampleArray});`)
-        lines.push(`    console.log("[${t.name}] filterBy${toPascal(ac.name)}Contains rows:", containsRows.length);`)
-      }
+      pushExampleOps('authenticatedSdk', 'authSession.userId')
+      lines.push(`  }`)
     }
-
-    lines.push(``)
-    lines.push(`    /** Clean up: delete the row created at the start */`)
-    lines.push(`    await sdk.delete(${idAccess});`)
-    lines.push(`    console.log("[${t.name}] deleted:", created.${a.primary.name});`)
-    lines.push(`  }`)
+    if (!targetRole || targetRole === 'service_role') {
+      lines.push(`  if (${camel}AccessRoles.includes("service_role")) {`)
+      lines.push(`    if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");`)
+      lines.push(`    console.log("[${t.name}][service_role] key=SUPABASE_SERVICE_ROLE_KEY, token=none");`)
+      if (a.hasEmbedder) {
+        lines.push(`    const serviceRoleSdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_SERVICE_ROLE_KEY, schema: SUPABASE_DB_SCHEMA, embedder });`)
+      } else {
+        lines.push(`    const serviceRoleSdk = new ${a.pascal}Sdk({ url: SUPABASE_URL, key: SUPABASE_SERVICE_ROLE_KEY, schema: SUPABASE_DB_SCHEMA });`)
+      }
+      pushExampleOps('serviceRoleSdk', 'crypto.randomUUID()')
+      lines.push(`  }`)
+    }
     lines.push(`}`)
   }
 
@@ -1525,9 +1555,25 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
     console.log(`  ✓ ${name}-sdk.ts`)
   }
 
-  const example = generateExampleFile(schema, analyzedTables, dbSchema)
-  await writeFile(path.join(dir, 'example.ts'), example)
-  console.log(`  ✓ example.ts`)
+  const supportsRole = (analysis: TableAnalysis, role: 'anon' | 'authenticated' | 'service_role'): boolean => {
+    if (role === 'anon') return analysis.accessRoles.length === 0 || analysis.accessRoles.includes('anon')
+    return analysis.accessRoles.includes(role)
+  }
+
+  const roleOrder: Array<'anon' | 'authenticated' | 'service_role'> = ['anon', 'authenticated', 'service_role']
+  for (const role of roleOrder) {
+    const roleTables = analyzedTables.filter(t => supportsRole(t.analysis, role))
+    if (!roleTables.length) continue
+    const example = generateExampleFile(schema, roleTables, dbSchema, role)
+    const fileName = `${role}.example.ts`
+    await writeFile(path.join(dir, fileName), example)
+    console.log(`  ✓ ${fileName}`)
+  }
+
+  const legacyExamplePath = path.join(dir, 'example.ts')
+  if (fs.existsSync(legacyExamplePath)) {
+    await fs.promises.unlink(legacyExamplePath)
+  }
 
   // Shared queue infrastructure (generated once if any table needs it)
   if (needsQueue) {
