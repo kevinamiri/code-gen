@@ -349,6 +349,35 @@ function genIndexes(name: string, table: TableSchema, a: TableAnalysis, dbSchema
   return lines.join('\n\n')
 }
 
+function genRealtimeSql(name: string, a: TableAnalysis, dbSchema: string): string {
+  const hasUserId = a.columns.some(c => c.name === 'user_id')
+  const supportsRealtimeOwnerFlow =
+    hasUserId &&
+    a.accessRoles.includes('authenticated') &&
+    a.accessRoles.includes('service_role')
+
+  if (!supportsRealtimeOwnerFlow) return ''
+
+  return `
+-- Why: stream table changes over Supabase Realtime for owner-scoped authenticated subscriptions.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = '${dbSchema}'
+      AND tablename = '${name}'
+  ) THEN
+    EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE ${dbSchema}.${name}';
+  END IF;
+END
+$$;
+
+-- Why: include complete old row values on UPDATE/DELETE change events.
+ALTER TABLE ${dbSchema}.${name} REPLICA IDENTITY FULL;`
+}
+
 // ── Vector search RPC ──
 
 function genSearchRpc(name: string, a: TableAnalysis, dbSchema: string): string {
@@ -722,6 +751,8 @@ function generateSQL(name: string, table: TableSchema, a: TableAnalysis, knownTa
 
   const indexes = genIndexes(name, table, a, dbSchema)
   if (indexes) sections.push(indexes)
+  const realtimeSql = genRealtimeSql(name, a, dbSchema)
+  if (realtimeSql) sections.push(realtimeSql)
 
   if (a.hasSearch) sections.push(genSearchRpc(name, a, dbSchema))
   for (const c of a.mergeCols) sections.push(genMergeRpc(name, c, a, dbSchema))
@@ -1187,6 +1218,24 @@ function sampleValueForTsType(tsType: string, pgType?: string): string {
   return `null`
 }
 
+function realtimeDeterministicUpdateValue(col: ResolvedColumn, sequenceExpr = 'changeSequence'): string | null {
+  const pg = col.type.toLowerCase().replace(/\s+/g, '')
+  const ts = col.tsType
+
+  if (col.name === 'user_id') return 'targetUserId'
+  if (pg === 'uuid') return 'targetUserId'
+  if (ts === 'string') return `\`realtime_change_\${${sequenceExpr}}\``
+  if (ts === 'number') return sequenceExpr
+  if (ts === 'boolean') return `(${sequenceExpr} % 2) === 1`
+  if (pg === 'jsonb' || pg === 'json' || ts === 'Record<string, any>' || ts === 'any') {
+    return `{ sequence: ${sequenceExpr}, source: "invoke_change.example.ts" }`
+  }
+  if (['timestamp', 'timestamptz', 'date', 'time'].includes(pg)) {
+    return `new Date(Date.UTC(2024, 0, 1, 0, 0, ${sequenceExpr})).toISOString()`
+  }
+  return null
+}
+
 function generateExampleFile(
   schema: Schema,
   tables: Array<{ name: string; analysis: TableAnalysis }>,
@@ -1510,6 +1559,205 @@ function generateExampleFile(
   return lines.join('\n')
 }
 
+function generateRealtimeSubscriberExampleFile(
+  tables: Array<{ name: string; analysis: TableAnalysis }>,
+  defaultDbSchema = 'public'
+): string {
+  const lines: string[] = []
+
+  lines.push(`import "dotenv/config";`)
+  lines.push(`import { createClient } from "@supabase/supabase-js";`)
+  lines.push('')
+  lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
+  lines.push(`const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? process.env.SUPABASE_KEY ?? "";`)
+  lines.push(`const SUPABASE_DB_SCHEMA = process.env.SUPABASE_DB_SCHEMA ?? "${defaultDbSchema}";`)
+  lines.push(`const SUPABASE_USER_EMAIL = process.env.SUPABASE_USER_EMAIL ?? "";`)
+  lines.push(`const SUPABASE_USER_PASSWORD = process.env.SUPABASE_USER_PASSWORD ?? "";`)
+  lines.push(`const TARGET_TABLE = process.env.TARGET_TABLE ?? "${tables[0]?.name ?? ''}";`)
+  lines.push('')
+  lines.push(`const ELIGIBLE_TABLES = [${tables.map(t => `"${t.name}"`).join(', ')}] as const;`)
+  lines.push('')
+  lines.push(`async function getAuthenticatedSession(): Promise<{ userId: string; accessToken: string }> {`)
+  lines.push(`  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY");`)
+  lines.push(`  if (!SUPABASE_USER_EMAIL || !SUPABASE_USER_PASSWORD) throw new Error("Missing SUPABASE_USER_EMAIL or SUPABASE_USER_PASSWORD");`)
+  lines.push(``)
+  lines.push(`  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {`)
+  lines.push(`    auth: { persistSession: false, autoRefreshToken: false },`)
+  lines.push(`    db: { schema: SUPABASE_DB_SCHEMA }`)
+  lines.push(`  });`)
+  lines.push(``)
+  lines.push(`  const { data, error } = await authClient.auth.signInWithPassword({ email: SUPABASE_USER_EMAIL, password: SUPABASE_USER_PASSWORD });`)
+  lines.push(`  if (error) throw new Error(\`Failed to sign in subscriber user: \${error.message}\`);`)
+  lines.push(`  const userId = data.user?.id ?? data.session?.user?.id;`)
+  lines.push(`  const accessToken = data.session?.access_token;`)
+  lines.push(`  if (!userId || !accessToken) throw new Error("Missing userId or accessToken from auth response");`)
+  lines.push(`  return { userId, accessToken };`)
+  lines.push(`}`)
+  lines.push('')
+  lines.push(`async function main(): Promise<void> {`)
+  lines.push(`  if (!ELIGIBLE_TABLES.length) throw new Error("No realtime-eligible tables. A table must have access [authenticated, service_role] and a user_id column.");`)
+  lines.push(`  if (!ELIGIBLE_TABLES.includes(TARGET_TABLE as typeof ELIGIBLE_TABLES[number])) {`)
+  lines.push(`    throw new Error(\`TARGET_TABLE must be one of: \${ELIGIBLE_TABLES.join(", ")}\`);`)
+  lines.push(`  }`)
+  lines.push(``)
+  lines.push(`  const session = await getAuthenticatedSession();`)
+  lines.push(`  const subscriberClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {`)
+  lines.push(`    auth: { persistSession: false, autoRefreshToken: false },`)
+  lines.push(`    db: { schema: SUPABASE_DB_SCHEMA },`)
+  lines.push(`    global: { headers: { Authorization: \`Bearer \${session.accessToken}\` } }`)
+  lines.push(`  });`)
+  lines.push(`  await subscriberClient.realtime.setAuth(session.accessToken);`)
+  lines.push(``)
+  lines.push(`  const channelName = \`realtime:\${TARGET_TABLE}:user:\${session.userId}\`;`)
+  lines.push(`  const channel = subscriberClient`)
+  lines.push(`    .channel(channelName)`)
+  lines.push(`    .on("postgres_changes", {`)
+  lines.push(`      event: "*",`)
+  lines.push(`      schema: SUPABASE_DB_SCHEMA,`)
+  lines.push(`      table: TARGET_TABLE,`)
+  lines.push(`      filter: \`user_id=eq.\${session.userId}\``)
+  lines.push(`    }, (payload) => {`)
+  lines.push(`      console.log("[realtime] event:", payload.eventType);`)
+  lines.push(`      console.log("[realtime] old:", payload.old);`)
+  lines.push(`      console.log("[realtime] new:", payload.new);`)
+  lines.push(`    });`)
+  lines.push(``)
+  lines.push(`  await new Promise<void>((resolve, reject) => {`)
+  lines.push(`    channel.subscribe((status, error) => {`)
+  lines.push(`      if (error) {`)
+  lines.push(`        reject(error);`)
+  lines.push(`        return;`)
+  lines.push(`      }`)
+  lines.push(`      if (status === "SUBSCRIBED") {`)
+  lines.push(`        console.log("[realtime] subscribed");`)
+  lines.push(`        console.log("[realtime] table:", TARGET_TABLE);`)
+  lines.push(`        console.log("[realtime] user_id filter:", session.userId);`)
+  lines.push(`        resolve();`)
+  lines.push(`      }`)
+  lines.push(`    });`)
+  lines.push(`  });`)
+  lines.push(``)
+  lines.push(`  process.on("SIGINT", async () => {`)
+  lines.push(`    await subscriberClient.removeChannel(channel);`)
+  lines.push(`    console.log("\\n[realtime] unsubscribed");`)
+  lines.push(`    process.exit(0);`)
+  lines.push(`  });`)
+  lines.push(``)
+  lines.push(`  console.log("[realtime] listening for row changes... (Ctrl+C to stop)");`)
+  lines.push(`  await new Promise<void>(() => {});`)
+  lines.push(`}`)
+  lines.push('')
+  lines.push(`main().catch((error) => {`)
+  lines.push(`  console.error(error);`)
+  lines.push(`  process.exit(1);`)
+  lines.push(`});`)
+  lines.push('')
+  return lines.join('\n')
+}
+
+function generateRealtimeInvokeChangeExampleFile(
+  tables: Array<{ name: string; analysis: TableAnalysis }>,
+  defaultDbSchema = 'public'
+): string {
+  const lines: string[] = []
+
+  lines.push(`import "dotenv/config";`)
+  lines.push(`import { createClient } from "@supabase/supabase-js";`)
+  lines.push('')
+  lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
+  lines.push(`const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? process.env.SUPABASE_KEY ?? "";`)
+  lines.push(`const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";`)
+  lines.push(`const SUPABASE_DB_SCHEMA = process.env.SUPABASE_DB_SCHEMA ?? "${defaultDbSchema}";`)
+  lines.push(`const SUPABASE_USER_EMAIL = process.env.SUPABASE_USER_EMAIL ?? "";`)
+  lines.push(`const SUPABASE_USER_PASSWORD = process.env.SUPABASE_USER_PASSWORD ?? "";`)
+  lines.push(`const TARGET_TABLE = process.env.TARGET_TABLE ?? "${tables[0]?.name ?? ''}";`)
+  lines.push(`const CHANGE_SEQUENCE = Number(process.env.CHANGE_SEQUENCE ?? "1");`)
+  lines.push('')
+  lines.push(`const ELIGIBLE_TABLES = [${tables.map(t => `"${t.name}"`).join(', ')}] as const;`)
+  lines.push('')
+  lines.push(`async function getTargetUserId(): Promise<string> {`)
+  lines.push(`  if (!SUPABASE_USER_EMAIL || !SUPABASE_USER_PASSWORD) throw new Error("Missing SUPABASE_USER_EMAIL or SUPABASE_USER_PASSWORD");`)
+  lines.push(`  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {`)
+  lines.push(`    auth: { persistSession: false, autoRefreshToken: false },`)
+  lines.push(`    db: { schema: SUPABASE_DB_SCHEMA }`)
+  lines.push(`  });`)
+  lines.push(``)
+  lines.push(`  const { data, error } = await authClient.auth.signInWithPassword({ email: SUPABASE_USER_EMAIL, password: SUPABASE_USER_PASSWORD });`)
+  lines.push(`  if (error) throw new Error(\`Failed to sign in target user: \${error.message}\`);`)
+  lines.push(`  const userId = data.user?.id ?? data.session?.user?.id;`)
+  lines.push(`  if (!userId) throw new Error("Missing user id in auth response");`)
+  lines.push(`  return userId;`)
+  lines.push(`}`)
+  lines.push('')
+  lines.push(`type InvokeChangeHandler = (serviceClient: ReturnType<typeof createClient>, targetUserId: string, changeSequence: number) => Promise<void>;`)
+  lines.push(`const invokeByTable: Record<string, InvokeChangeHandler> = {};`)
+
+  for (const t of tables) {
+    const analysis = t.analysis
+    const pascal = analysis.pascal
+    const tableConst = toCamel(`${pascal}RowIdEnv`)
+    const rowIdEnv = `${t.name.toUpperCase()}_ROW_ID`
+    const mutableCols = analysis.columns.filter(c => !c.primary && !c.type.toLowerCase().startsWith('vector') && c.name !== 'created_at')
+    const updateCol =
+      mutableCols.find(c => c.name !== 'user_id' && realtimeDeterministicUpdateValue(c) !== null) ??
+      mutableCols.find(c => realtimeDeterministicUpdateValue(c) !== null)
+    const updateExpr = updateCol ? realtimeDeterministicUpdateValue(updateCol)! : 'targetUserId'
+
+    lines.push('')
+    lines.push(`const ${tableConst} = process.env.${rowIdEnv} ?? "";`)
+    lines.push(`async function invoke${pascal}Change(serviceClient: ReturnType<typeof createClient>, targetUserId: string, changeSequence: number): Promise<void> {`)
+    lines.push(`  if (!${tableConst}) throw new Error("Missing ${rowIdEnv} env var for table \\"${t.name}\\"");`)
+    lines.push(`  const updatePayload: Record<string, any> = {`)
+    lines.push(`    user_id: targetUserId,`)
+    if (updateCol && updateCol.name !== 'user_id') {
+      lines.push(`    ${updateCol.name}: ${updateExpr},`)
+    }
+    lines.push(`  };`)
+    lines.push(``)
+    lines.push(`  const { data, error } = await serviceClient`)
+    lines.push(`    .from("${t.name}")`)
+    lines.push(`    .update(updatePayload)`)
+    lines.push(`    .eq("${analysis.primary.name}", ${tableConst})`)
+    lines.push(`    .eq("user_id", targetUserId)`)
+    lines.push(`    .select("*")`)
+    lines.push(`    .single();`)
+    lines.push(``)
+    lines.push(`  if (error) throw new Error(\`[${t.name}] update failed: \${error.message}\`);`)
+    lines.push(`  console.log("[invoke_change][${t.name}] changed row:", data?.${analysis.primary.name});`)
+    lines.push(`  console.log("[invoke_change][${t.name}] user_id:", targetUserId);`)
+    lines.push(`  console.log("[invoke_change][${t.name}] sequence:", changeSequence);`)
+    lines.push(`}`)
+    lines.push(`invokeByTable["${t.name}"] = invoke${pascal}Change;`)
+  }
+
+  lines.push('')
+  lines.push(`async function main(): Promise<void> {`)
+  lines.push(`  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY");`)
+  lines.push(`  if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");`)
+  lines.push(`  if (!ELIGIBLE_TABLES.length) throw new Error("No realtime-eligible tables. A table must have access [authenticated, service_role] and a user_id column.");`)
+  lines.push(`  if (!ELIGIBLE_TABLES.includes(TARGET_TABLE as typeof ELIGIBLE_TABLES[number])) {`)
+  lines.push(`    throw new Error(\`TARGET_TABLE must be one of: \${ELIGIBLE_TABLES.join(", ")}\`);`)
+  lines.push(`  }`)
+  lines.push(``)
+  lines.push(`  const targetUserId = await getTargetUserId();`)
+  lines.push(`  const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {`)
+  lines.push(`    auth: { persistSession: false, autoRefreshToken: false },`)
+  lines.push(`    db: { schema: SUPABASE_DB_SCHEMA }`)
+  lines.push(`  });`)
+  lines.push(``)
+  lines.push(`  const invoke = invokeByTable[TARGET_TABLE];`)
+  lines.push(`  if (!invoke) throw new Error(\`No invoke handler for table: \${TARGET_TABLE}\`);`)
+  lines.push(`  await invoke(serviceClient, targetUserId, CHANGE_SEQUENCE);`)
+  lines.push(`}`)
+  lines.push('')
+  lines.push(`main().catch((error) => {`)
+  lines.push(`  console.error(error);`)
+  lines.push(`  process.exit(1);`)
+  lines.push(`});`)
+  lines.push('')
+  return lines.join('\n')
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 🚀 Orchestrator + CLI
 // ═══════════════════════════════════════════════════════════════
@@ -1579,6 +1827,21 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
   const legacyExamplePath = path.join(dir, 'example.ts')
   if (fs.existsSync(legacyExamplePath)) {
     await fs.promises.unlink(legacyExamplePath)
+  }
+
+  const realtimeEligibleTables = analyzedTables.filter(t =>
+    t.analysis.accessRoles.includes('authenticated') &&
+    t.analysis.accessRoles.includes('service_role') &&
+    t.analysis.columns.some(c => c.name === 'user_id')
+  )
+  if (realtimeEligibleTables.length) {
+    const subscriber = generateRealtimeSubscriberExampleFile(realtimeEligibleTables, dbSchema)
+    await writeFile(path.join(dir, 'subscriber.example.ts'), subscriber)
+    console.log(`  ✓ subscriber.example.ts`)
+
+    const invokeChange = generateRealtimeInvokeChangeExampleFile(realtimeEligibleTables, dbSchema)
+    await writeFile(path.join(dir, 'invoke_change.example.ts'), invokeChange)
+    console.log(`  ✓ invoke_change.example.ts`)
   }
 
   // Shared queue infrastructure (generated once if any table needs it)

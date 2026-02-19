@@ -94,3 +94,20 @@ access: [anon, authenticated, service_role]
 - If data is user-owned/private: use **`[authenticated]`** (or add `service_role` only for backend jobs).
 - If you include `anon`, treat table as public-access in current policy generation.
 - Keep `service_role` usage strictly server-side.
+
+
+---
+
+
+## Realtime Example
+
+Demonstrates owner-scoped realtime subscriptions: authenticated users receive live updates only for rows they own (`user_id` filter).
+
+**Flow:**
+1. `service_role` updates a row in the table
+2. Authenticated user with matching `user_id` receives the change event
+3. Users cannot see changes to rows owned by others
+
+**Generated files:**
+- `subscriber.example.ts` — Long-lived consumer that subscribes to row changes
+- `invoke_change.example.ts` — Deterministic producer that triggers row updates
