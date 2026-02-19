@@ -1571,7 +1571,7 @@ function generateRealtimeSubscriberExampleFile(
   const lines: string[] = []
 
   lines.push(`import "dotenv/config";`)
-  lines.push(`import { createClient } from "@supabase/supabase-js";`)
+  lines.push(`import { createClient, type SupabaseClient } from "@supabase/supabase-js";`)
   lines.push('')
   lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
   lines.push(`const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? process.env.SUPABASE_KEY ?? "";`)
@@ -1667,7 +1667,7 @@ function generateRealtimeInvokeChangeExampleFile(
   const lines: string[] = []
 
   lines.push(`import "dotenv/config";`)
-  lines.push(`import { createClient } from "@supabase/supabase-js";`)
+  lines.push(`import { createClient, type SupabaseClient } from "@supabase/supabase-js";`)
   lines.push('')
   lines.push(`const SUPABASE_URL = process.env.SUPABASE_URL ?? "";`)
   lines.push(`const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? process.env.SUPABASE_KEY ?? "";`)
@@ -1694,7 +1694,8 @@ function generateRealtimeInvokeChangeExampleFile(
   lines.push(`  return userId;`)
   lines.push(`}`)
   lines.push('')
-  lines.push(`type InvokeChangeHandler = (serviceClient: ReturnType<typeof createClient>, targetUserId: string, changeSequence: number) => Promise<void>;`)
+  lines.push(`type AppSupabaseClient = SupabaseClient<any, string, string, any, any>;`)
+  lines.push(`type InvokeChangeHandler = (serviceClient: AppSupabaseClient, targetUserId: string, changeSequence: number) => Promise<void>;`)
   lines.push(`const invokeByTable: Record<string, InvokeChangeHandler> = {};`)
 
   for (const t of tables) {
@@ -1710,7 +1711,7 @@ function generateRealtimeInvokeChangeExampleFile(
 
     lines.push('')
     lines.push(`const ${tableConst} = process.env.${rowIdEnv} ?? "";`)
-    lines.push(`async function invoke${pascal}Change(serviceClient: ReturnType<typeof createClient>, targetUserId: string, changeSequence: number): Promise<void> {`)
+    lines.push(`async function invoke${pascal}Change(serviceClient: AppSupabaseClient, targetUserId: string, changeSequence: number): Promise<void> {`)
     lines.push(`  if (!${tableConst}) throw new Error("Missing ${rowIdEnv} env var for table \\"${t.name}\\"");`)
     lines.push(`  const updatePayload: Record<string, any> = {`)
     lines.push(`    user_id: targetUserId,`)
