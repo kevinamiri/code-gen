@@ -101,9 +101,9 @@ access: [anon, authenticated, service_role]
 ---
 
 
-## Realtime Example
+## Subscriber Worker (Outbox Pattern)
 
-Demonstrates owner-scoped realtime subscriptions: authenticated users receive live updates only for rows they own (`user_id` filter).
+Uses one service-role worker for all users via database outbox polling (no per-user authenticated websocket subscriber).
 
 Enable it per table via schema feature:
 
@@ -116,13 +116,13 @@ tables:
 ```
 
 **Flow:**
-1. `service_role` updates a row in the table
-2. Authenticated user with matching `user_id` receives the change event
-3. Users cannot see changes to rows owned by others
+1. Table trigger enqueues change event into `subscriber_outbox`
+2. `subscriber.ts` worker claims jobs (`claim_subscriber_outbox`)
+3. Worker handles event and `ack` on success, `nack` with retry/backoff on failure
 
 **Generated files:**
-- `subscriber.example.ts` — Long-lived consumer that subscribes to row changes
-- `invoke_change.example.ts` — Deterministic producer that triggers row updates
+- `subscriber.ts` — Service-role outbox worker (`claim`/`ack`/`nack`)
+- `sql/subscriber_outbox.sql` — Shared outbox table + SQL functions
 
 ---
 
@@ -138,7 +138,7 @@ Where app is the schema name and prompts is the table name.
 Extract types from Supabase using the following command:
 
 ```bash
-curl -sS "https://code.maila.ai/pg/generators/typescript?included_schemas=app" \
+curl -sS "https://w3.maila.ai/pg/generators/typescript?included_schemas=app" \
   -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
   -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
 ```
@@ -146,7 +146,7 @@ curl -sS "https://code.maila.ai/pg/generators/typescript?included_schemas=app" \
 Extract OpenAPI from Supabase using the following command:
 
 ```bash
-curl -sS "https://code.maila.ai/pg/generators/openapi?included_schemas=app" \
+curl -sS "https://w3.maila.ai/pg/generators/openapi?included_schemas=app" \
   -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
   -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
   > supabase.openapi.json
