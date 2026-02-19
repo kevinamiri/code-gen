@@ -53,7 +53,7 @@ interface TableAnalysis {
   mergeCols: ResolvedColumn[]; appendCols: ResolvedColumn[]; statsCols: ResolvedColumn[];
   contentCols: ResolvedColumn[];       // trigger re-enqueue on change
   accessRoles: Array<'anon' | 'authenticated' | 'service_role'>;
-  hasEmbedder: boolean; hasQueueTrigger: boolean; hasSearch: boolean;
+  hasEmbedder: boolean; hasQueueTrigger: boolean; hasRealtimeSubscription: boolean; hasSearch: boolean;
 }
 
 const VECTOR_TYPE_FQN = 'extensions.vector'
@@ -201,6 +201,16 @@ function analyzeTable(name: string, table: TableSchema): TableAnalysis {
 
   const features = table.features ?? []
   const accessRoles = normalizeAccessRoles(table.access)
+  const hasRealtimeSubscription = features.includes('realtime_subscription')
+  const hasUserId = columns.some(c => c.name === 'user_id')
+  if (hasRealtimeSubscription) {
+    if (!hasUserId) {
+      throw new Error(`Table "${name}" feature "realtime_subscription" requires a user_id column`)
+    }
+    if (!(accessRoles.includes('authenticated') && accessRoles.includes('service_role'))) {
+      throw new Error(`Table "${name}" feature "realtime_subscription" requires access to include both authenticated and service_role`)
+    }
+  }
 
   return {
     name, pascal: toPascal(singularize(name)),
@@ -209,6 +219,7 @@ function analyzeTable(name: string, table: TableSchema): TableAnalysis {
     accessRoles,
     hasEmbedder: vectorCols.length > 0,
     hasQueueTrigger: features.includes('queue_trigger'),
+    hasRealtimeSubscription,
     hasSearch: searchVectorCol !== null,
   }
 }
@@ -350,13 +361,7 @@ function genIndexes(name: string, table: TableSchema, a: TableAnalysis, dbSchema
 }
 
 function genRealtimeSql(name: string, a: TableAnalysis, dbSchema: string): string {
-  const hasUserId = a.columns.some(c => c.name === 'user_id')
-  const supportsRealtimeOwnerFlow =
-    hasUserId &&
-    a.accessRoles.includes('authenticated') &&
-    a.accessRoles.includes('service_role')
-
-  if (!supportsRealtimeOwnerFlow) return ''
+  if (!a.hasRealtimeSubscription) return ''
 
   return `
 -- Why: stream table changes over Supabase Realtime for owner-scoped authenticated subscriptions.
@@ -1829,11 +1834,7 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
     await fs.promises.unlink(legacyExamplePath)
   }
 
-  const realtimeEligibleTables = analyzedTables.filter(t =>
-    t.analysis.accessRoles.includes('authenticated') &&
-    t.analysis.accessRoles.includes('service_role') &&
-    t.analysis.columns.some(c => c.name === 'user_id')
-  )
+  const realtimeEligibleTables = analyzedTables.filter(t => t.analysis.hasRealtimeSubscription)
   if (realtimeEligibleTables.length) {
     const subscriber = generateRealtimeSubscriberExampleFile(realtimeEligibleTables, dbSchema)
     await writeFile(path.join(dir, 'subscriber.example.ts'), subscriber)
@@ -1842,6 +1843,15 @@ async function generate(schemaPath: string, outputDir: string): Promise<void> {
     const invokeChange = generateRealtimeInvokeChangeExampleFile(realtimeEligibleTables, dbSchema)
     await writeFile(path.join(dir, 'invoke_change.example.ts'), invokeChange)
     console.log(`  ✓ invoke_change.example.ts`)
+  } else {
+    const subscriberPath = path.join(dir, 'subscriber.example.ts')
+    if (fs.existsSync(subscriberPath)) {
+      await fs.promises.unlink(subscriberPath)
+    }
+    const invokeChangePath = path.join(dir, 'invoke_change.example.ts')
+    if (fs.existsSync(invokeChangePath)) {
+      await fs.promises.unlink(invokeChangePath)
+    }
   }
 
   // Shared queue infrastructure (generated once if any table needs it)

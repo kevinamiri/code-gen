@@ -2,6 +2,7 @@ tables:
   prompts:
     description: "Prompt storage (user-owned, authenticated only)"
     access: [authenticated, service_role]
+    features: [realtime_subscription]
     columns:
       - name: id
         type: uuid

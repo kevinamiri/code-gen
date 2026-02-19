@@ -35,9 +35,9 @@ bun gen.ts schema.yaml
 ```
 
 
-Role configuration
+## Role configuration
 
-## Single role examples
+### Single role examples
 
 ```yaml
 # 1) Public read/write (no user identity)
@@ -102,6 +102,16 @@ access: [anon, authenticated, service_role]
 ## Realtime Example
 
 Demonstrates owner-scoped realtime subscriptions: authenticated users receive live updates only for rows they own (`user_id` filter).
+
+Enable it per table via schema feature:
+
+```yaml
+tables:
+  prompts:
+    access: [authenticated, service_role]
+    features: [realtime_subscription]
+    # requires user_id column
+```
 
 **Flow:**
 1. `service_role` updates a row in the table
