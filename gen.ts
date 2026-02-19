@@ -1437,9 +1437,15 @@ function generateExampleFile(
     lines.push(`async function ${fnName}(authSession?: { accessToken: string; userId: string }): Promise<void> {`)
     lines.push(`  /**`)
     lines.push(`   * Key/token mapping by role:`)
-    lines.push(`   * - anon: SUPABASE_ANON_KEY, no user JWT`)
-    lines.push(`   * - authenticated: SUPABASE_ANON_KEY + user JWT (authSession.accessToken)`)
-    lines.push(`   * - service_role: SUPABASE_SERVICE_ROLE_KEY, no user JWT`)
+    if (!targetRole || targetRole === 'anon') {
+      lines.push(`   * - anon: SUPABASE_ANON_KEY, no user JWT`)
+    }
+    if (!targetRole || targetRole === 'authenticated') {
+      lines.push(`   * - authenticated: SUPABASE_ANON_KEY + user JWT (authSession.accessToken)`)
+    }
+    if (!targetRole || targetRole === 'service_role') {
+      lines.push(`   * - service_role: SUPABASE_SERVICE_ROLE_KEY, no user JWT`)
+    }
     lines.push(`   */`)
     lines.push(`  console.log("[${t.name}] access roles:", ${camel}AccessRoles.length ? ${camel}AccessRoles.join(", ") : "none (defaulting to anon)");`)
     lines.push(``)

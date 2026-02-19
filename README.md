@@ -79,7 +79,7 @@ access: [anon, authenticated]
 ```
 - In current generator logic, `anon` makes access effectively open for both roles
 - Not owner-scoped in this combo (important caveat)
-- so this is the same as [anon] alone.
+
 
 ```yaml
 # 6) All roles
@@ -94,5 +94,3 @@ access: [anon, authenticated, service_role]
 - If data is user-owned/private: use **`[authenticated]`** (or add `service_role` only for backend jobs).
 - If you include `anon`, treat table as public-access in current policy generation.
 - Keep `service_role` usage strictly server-side.
-
-Goal: please revise the code generator to generate  the example file in more clear way, as if when two or more roles being used in access, the example would create clearity on this that developer would understand how to use each role in the code. And hoe each role will uses the different tokens, this even can be clearer with extra comments in the generated example code.
