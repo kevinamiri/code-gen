@@ -1,4 +1,6 @@
 
+
+
 Tool Description:
 A modular code generator that creates type, sdk, and sql migrations files for Supabas postgres database. It generates methods for vector similarity search, JSONB filtering, and some array operations.
 
@@ -121,3 +123,51 @@ tables:
 **Generated files:**
 - `subscriber.example.ts` — Long-lived consumer that subscribes to row changes
 - `invoke_change.example.ts` — Deterministic producer that triggers row updates
+
+---
+
+## Extract types from Supabase database
+
+```bash
+bun extract-types.ts app prompts
+```
+Where app is the schema name and prompts is the table name.
+
+--- other useful commands for Supabase ---
+
+Extract types from Supabase using the following command:
+
+```bash
+curl -sS "https://code.maila.ai/pg/generators/typescript?included_schemas=app" \
+  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
+```
+
+Extract OpenAPI from Supabase using the following command:
+
+```bash
+curl -sS "https://code.maila.ai/pg/generators/openapi?included_schemas=app" \
+  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  > supabase.openapi.json
+```
+
+
+---
+
+
+
+
+We should use service role key for subscriber flow that listening to the table. We need one worker for all users (not per-user auth subscriber).
+
+
+- Refactor generated subscriber to outbox worker pattern:
+  - service-role worker polls queue
+  - claim/ack/nack semantics
+  - retry/backoff
+  - table triggers enqueue events
+- Generator now outputs:
+  - `generated/subscriber.ts` (outbox worker)
+  - `generated/sql/subscriber_outbox.sql`
+
+Reliability now comes from DB workflow (`subscriber_outbox` + claim/ack/nack + retries), which is safer and scalable.
