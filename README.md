@@ -154,20 +154,3 @@ curl -sS "https://code.maila.ai/pg/generators/openapi?included_schemas=app" \
 
 
 ---
-
-
-
-
-We should use service role key for subscriber flow that listening to the table. We need one worker for all users (not per-user auth subscriber).
-
-
-- Refactor generated subscriber to outbox worker pattern:
-  - service-role worker polls queue
-  - claim/ack/nack semantics
-  - retry/backoff
-  - table triggers enqueue events
-- Generator now outputs:
-  - `generated/subscriber.ts` (outbox worker)
-  - `generated/sql/subscriber_outbox.sql`
-
-Reliability now comes from DB workflow (`subscriber_outbox` + claim/ack/nack + retries), which is safer and scalable.
