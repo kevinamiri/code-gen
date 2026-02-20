@@ -214,14 +214,14 @@ function analyzeTable(name: string, table: TableSchema): TableAnalysis {
 
   const features = table.features ?? []
   const accessRoles = normalizeAccessRoles(table.access)
-  const hasRealtimeSubscription = features.includes('realtime_subscription')
+  const hasRealtimeSubscription = features.includes('outbox-worker')
   const hasUserId = columns.some(c => c.name === 'user_id')
   if (hasRealtimeSubscription) {
     if (!hasUserId) {
-      throw new Error(`Table "${name}" feature "realtime_subscription" requires a user_id column`)
+      throw new Error(`Table "${name}" feature "outbox-worker" requires a user_id column`)
     }
     if (!(accessRoles.includes('authenticated') && accessRoles.includes('service_role'))) {
-      throw new Error(`Table "${name}" feature "realtime_subscription" requires access to include both authenticated and service_role`)
+      throw new Error(`Table "${name}" feature "outbox-worker" requires access to include both authenticated and service_role`)
     }
   }
 
@@ -1831,7 +1831,7 @@ function generateSubscriberWorkerFile(
   lines.push('')
   lines.push(`async function main(): Promise<void> {`)
   lines.push(`  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");`)
-  lines.push(`  if (!ELIGIBLE_TOPICS.length) throw new Error("No outbox-eligible tables. A table must use features: [realtime_subscription].");`)
+  lines.push(`  if (!ELIGIBLE_TOPICS.length) throw new Error("No outbox-eligible tables. A table must use features: [outbox-worker].");`)
   lines.push(`  if (TARGET_TOPIC && !ELIGIBLE_TOPICS.includes(TARGET_TOPIC as typeof ELIGIBLE_TOPICS[number])) {`)
   lines.push(`    throw new Error(\`TARGET_TOPIC/TARGET_TABLE must be one of: \${ELIGIBLE_TOPICS.join(", ")}\`);`)
   lines.push(`  }`)

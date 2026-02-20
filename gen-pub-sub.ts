@@ -214,14 +214,14 @@ function analyzeTable(name: string, table: TableSchema): TableAnalysis {
 
   const features = table.features ?? []
   const accessRoles = normalizeAccessRoles(table.access)
-  const hasRealtimeSubscription = features.includes('realtime_subscription')
+  const hasRealtimeSubscription = features.includes('pub-sub')
   const hasUserId = columns.some(c => c.name === 'user_id')
   if (hasRealtimeSubscription) {
     if (!hasUserId) {
-      throw new Error(`Table "${name}" feature "realtime_subscription" requires a user_id column`)
+      throw new Error(`Table "${name}" feature "pub-sub" requires a user_id column`)
     }
     if (!(accessRoles.includes('authenticated') && accessRoles.includes('service_role'))) {
-      throw new Error(`Table "${name}" feature "realtime_subscription" requires access to include both authenticated and service_role`)
+      throw new Error(`Table "${name}" feature "pub-sub" requires access to include both authenticated and service_role`)
     }
   }
 

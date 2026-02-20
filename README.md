@@ -121,7 +121,7 @@ Enable it per table via schema feature:
 tables:
   prompts:
     access: [authenticated, service_role]
-    features: [realtime_subscription]
+    features: [pub-sub]
     # requires user_id column
 ```
 
@@ -161,3 +161,4 @@ curl -sS "https://w3.maila.ai/pg/generators/openapi?included_schemas=app" \
   -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
   > supabase.openapi.json
 ```
+

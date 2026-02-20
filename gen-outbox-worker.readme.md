@@ -32,8 +32,8 @@ Conditional:
 - `generated/anon.example.ts` when at least one table supports anon (or has empty `access`)
 - `generated/authenticated.example.ts` when at least one table includes `authenticated`
 - `generated/service_role.example.ts` when at least one table includes `service_role`
-- `generated/subscriber.ts` when any table has `features: [realtime_subscription]`
-- `generated/sql/subscriber_outbox.sql` when any table has `features: [realtime_subscription]`
+- `generated/subscriber.ts` when any table has `features: [outbox-worker]`
+- `generated/sql/subscriber_outbox.sql` when any table has `features: [outbox-worker]`
 - `generated/queue.sql` when any table has `features: [queue_trigger]`
 
 Cleanup behavior:
@@ -50,7 +50,7 @@ tables:
   prompts:
     description: "Prompt storage"
     access: [authenticated, service_role] # optional
-    features: [realtime_subscription, queue_trigger] # optional
+    features: [outbox-worker, queue_trigger] # optional
     columns:
       - name: id
         type: uuid
@@ -89,7 +89,7 @@ Column fields supported:
   - `anon` is not present
 - If `anon` is included, generated policies are open-access for the declared roles
 
-Realtime constraints (`features: [realtime_subscription]`):
+Realtime constraints (`features: [outbox-worker]`):
 
 - requires a `user_id` column
 - requires `access` to include both `authenticated` and `service_role`
