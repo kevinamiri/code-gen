@@ -1,16 +1,17 @@
-## Overview
+# Generate Supabase Pub-Sub SDK
 
-`gen-pub-sub.ts` reads `schema.yaml` and generates Supabase SQL + TypeScript assets per table, including optional role-based examples, queue infrastructure, and realtime subscription examples.
+Schema-driven code generator. Reads a YAML schema, analyzes each table, and emits production-ready SQL + TypeScript targeting Supabase with Realtime pub-sub support.
 
-Canonical CLI:
-
-```bash
-npx ts-node gen-pub-sub.ts schema.yaml
-```
-
-Or
+## Quick Start
 
 ```bash
 bun gen-pub-sub.ts schema.yaml
 ```
 
+Arguments are positional and optional:
+- Arg 1: schema path (default `schema.yaml`)
+
+## Core Workflow
+
+1. **Define tables** in `schema.yaml`.
+2. **Run the generator**: `bun gen-pub-sub.ts schema.yaml`

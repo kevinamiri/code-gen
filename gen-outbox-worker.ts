@@ -1737,7 +1737,7 @@ function generateExampleFile(
     lines.push(`  const authSession: { accessToken: string; userId: string } | undefined = undefined;`)
   }
   for (const t of tables) {
-  lines.push(`  await run${t.analysis.pascal}Examples(authSession);`)
+    lines.push(`  await run${t.analysis.pascal}Examples(authSession);`)
   }
   lines.push(`}`)
   lines.push('')
@@ -1837,7 +1837,7 @@ function generateSubscriberWorkerFile(
   lines.push(`  }`)
   lines.push(``)
   lines.push(`  const client: WorkerClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {`)
-    lines.push(`    auth: { persistSession: false, autoRefreshToken: false },`)
+  lines.push(`    auth: { persistSession: false, autoRefreshToken: false },`)
   lines.push(`    db: { schema: SUPABASE_DB_SCHEMA }`)
   lines.push(`  });`)
   lines.push(``)

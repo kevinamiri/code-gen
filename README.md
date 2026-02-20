@@ -111,28 +111,31 @@ access: [anon, authenticated, service_role]
 ---
 
 
-## Subscriber Worker (Outbox Pattern)
+## Schema Overview
 
-Uses one service-role worker for all users via database outbox polling (no per-user authenticated websocket subscriber).
-
-Enable it per table via schema feature:
+A schema YAML has two top-level keys:
 
 ```yaml
 tables:
-  prompts:
+  table_name:
+    description: "..."
     access: [authenticated, service_role]
     features: [pub-sub]
-    # requires user_id column
+    columns: [...]
+    indexes: [...]
+
+config:
+  
+  db_schema: app
+  embed_dim: 1536
 ```
 
-**Flow:**
-1. Table trigger enqueues change event into `subscriber_outbox`
-2. `subscriber.ts` worker claims jobs (`claim_subscriber_outbox`)
-3. Worker handles event and `ack` on success, `nack` with retry/backoff on failure
+## Key Constraints
+- `output_dir` is the directory where the generated files will be saved
+- `embed_dim` is the dimension of the embedding vector
+- `pub-sub` feature requires: a `user_id` column AND access includes both `authenticated` and `service_role`
+- `db_schema` matches the supabase database schema
 
-**Generated files:**
-- `subscriber.ts` — Service-role outbox worker (`claim`/`ack`/`nack`)
-- `sql/subscriber_outbox.sql` — Shared outbox table + SQL functions
 
 ---
 
