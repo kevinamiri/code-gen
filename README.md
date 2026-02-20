@@ -1,7 +1,4 @@
 
-
-
-Tool Description:
 A modular code generator that creates type, sdk, and sql migrations files for Supabas postgres database. It generates methods for vector similarity search, JSONB filtering, and some array operations.
 
 ## 🎯 Problem This Solves
@@ -30,12 +27,25 @@ Manually writing these for each table is repetitive and error-prone. This tool a
 
 
 
+1. **Publish–Subscribe (Pub/Sub)**  
+file: `gen-pub-sub.ts`
+For the frontend realtime listener receiving `INSERT/UPDATE` events.
+
+2. **Transactional Outbox + Worker (Work Queue / Competing Consumers)**  
+file: `gen-outbox-worker.ts`
+For the DB trigger writing to a queue table and a worker polling/processing async tasks.
+
+
 ## 🚀 Usage
 
 ```bash
-bun gen.ts schema.yaml
+bun gen-pub-sub.ts schema.yaml
 ```
 
+
+```bash
+bun gen-outbox-worker.ts schema.yaml
+```
 
 ## Role configuration
 
@@ -151,6 +161,3 @@ curl -sS "https://w3.maila.ai/pg/generators/openapi?included_schemas=app" \
   -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
   > supabase.openapi.json
 ```
-
-
----

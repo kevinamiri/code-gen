@@ -1,8 +1,21 @@
-// ═══════════════════════════════════════════════════════════════
-// code-gen.ts — Supabase Schema-Driven Code Generator v2
-// Generates: {table}-sdk.ts, {table}-types.ts, {table}.sql
-// Patterns: vector search, JSONB merge/append/stats, array ops, queue triggers
-// ═══════════════════════════════════════════════════════════════
+/**
+ * ═══════════════════════════════════════════════════════════════
+ * gen-outbox-worker.ts — Supabase Schema-Driven Code Generator
+ * Use-case: Backend outbox pattern — DB trigger enqueues row changes, worker polls and processes async tasks.
+ *  
+ * 
+ * Generates:
+ *   - {table}.sql              — Table DDL, triggers, functions
+ *   - {table}.policy.sql       — RLS policies
+ *   - {table}-types.ts         — TypeScript types
+ *   - {table}-sdk.ts           — CRUD SDK with typed methods
+ *   - authenticated.example.ts — Example for authenticated role
+ *   - service_role.example.ts  — Example for service_role
+ *   - subscriber.ts            — Outbox worker subscriber
+ *   - sql/subscriber_outbox.sql — Outbox queue infrastructure
+ * 
+ * ═══════════════════════════════════════════════════════════════
+ */
 
 import * as yaml from 'yaml'
 import * as fs from 'fs'

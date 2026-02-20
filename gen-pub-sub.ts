@@ -1,8 +1,21 @@
-// ═══════════════════════════════════════════════════════════════
-// code-gen.ts — Supabase Schema-Driven Code Generator v2
-// Generates: {table}-sdk.ts, {table}-types.ts, {table}.sql
-// Patterns: vector search, JSONB merge/append/stats, array ops, queue triggers
-// ═══════════════════════════════════════════════════════════════
+/**
+ * ═══════════════════════════════════════════════════════════════
+ * gen-pub-sub.ts — Supabase Schema-Driven Code Generator
+ * Use-case: Frontend realtime listener receiving INSERT/UPDATE events
+ * 
+ * Generates:
+ *   - {table}.sql              — Table DDL, triggers, functions
+ *   - {table}.policy.sql       — RLS policies
+ *   - {table}-types.ts         — TypeScript types
+ *   - {table}-sdk.ts           — CRUD SDK with typed methods
+ *   - authenticated.example.ts — Example for authenticated role
+ *   - service_role.example.ts  — Example for service_role
+ *   - subscriber.example.ts    — Realtime subscription example
+ *   - invoke_change.example.ts — Trigger change for testing
+ * 
+ * ═══════════════════════════════════════════════════════════════
+ */
+
 
 import * as yaml from 'yaml'
 import * as fs from 'fs'
